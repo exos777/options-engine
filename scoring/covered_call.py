@@ -16,6 +16,7 @@ Weights are adjusted based on the user's risk profile.
 from __future__ import annotations
 
 import math
+from datetime import date
 from typing import Optional
 
 import pandas as pd
@@ -220,6 +221,7 @@ def score_covered_calls(
     support_levels: list[SupportResistanceLevel],
     resistance_levels: list[SupportResistanceLevel],
     params: FilterParams,
+    earnings_date: Optional[str] = None,
 ) -> list[ScoredOption]:
     """
     Score each call option contract and return a list of ScoredOption,
@@ -281,6 +283,18 @@ def score_covered_calls(
         elif regime.trade_bias == "caution":
             composite *= 0.75
 
+        # Earnings penalty: binary event within the expiration window elevates risk
+        earnings_in_window = False
+        if earnings_date:
+            try:
+                ed = date.fromisoformat(earnings_date)
+                exp = date.fromisoformat(c.expiration)
+                if ed <= exp:
+                    earnings_in_window = True
+                    composite *= 0.65
+            except Exception:
+                pass
+
         near_sup = any(is_near_level(c.strike, s) for s in support_levels)
         near_res = any(is_near_level(c.strike, r) for r in resistance_levels)
 
@@ -303,6 +317,7 @@ def score_covered_calls(
                     c.strike >= (params.cost_basis or 0.0)
                     if params.cost_basis is not None else None
                 ),
+                earnings_in_window=earnings_in_window,
             )
         )
 

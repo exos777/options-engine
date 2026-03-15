@@ -258,6 +258,7 @@ def run_pipeline(ticker: str, expiration: str, params: FilterParams):
             indicators, regime,
             support_lvls, resistance_lvls,
             params,
+            earnings_date=quote.earnings_date,
         )
     else:
         scored = score_cash_secured_puts(
@@ -265,6 +266,7 @@ def run_pipeline(ticker: str, expiration: str, params: FilterParams):
             indicators, regime,
             support_lvls, resistance_lvls,
             params,
+            earnings_date=quote.earnings_date,
         )
 
     progress.progress(92, text="Building recommendations…")

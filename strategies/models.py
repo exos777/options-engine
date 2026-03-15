@@ -172,6 +172,7 @@ class ScoredOption:
     near_support: bool = False
     near_resistance: bool = False
     above_cost_basis: Optional[bool] = None
+    earnings_in_window: bool = False  # True if an earnings event falls before expiration
 
 
 @dataclass

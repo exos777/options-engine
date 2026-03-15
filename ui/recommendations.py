@@ -109,7 +109,7 @@ def render_recommendation_card(rec: Recommendation, strategy: Strategy) -> None:
         f"| Score {opt.score:.0f}/100",
         expanded=True,
     ):
-        m1, m2, m3, m4 = st.columns(4)
+        m1, m2, m3, m4, m5 = st.columns(5)
         m1.metric("Strike", f"${c.strike:.2f}")
         m1.metric("Premium", f"${opt.premium:.2f}")
 
@@ -131,6 +131,15 @@ def render_recommendation_card(rec: Recommendation, strategy: Strategy) -> None:
         )
         m4.metric("Break-even", f"${opt.break_even:.2f}")
 
+        m5.metric(
+            "Theta / day",
+            f"${c.theta:.4f}" if c.theta is not None else "—",
+        )
+        m5.metric(
+            "Vega / 1% IV",
+            f"${c.vega:.4f}" if c.vega is not None else "—",
+        )
+
         iv_rank_part = (
             f"  IV Rank: {opt.iv_rank_score:.0f}"
             if opt.iv_rank_score != 50.0
@@ -149,8 +158,10 @@ def render_recommendation_card(rec: Recommendation, strategy: Strategy) -> None:
         # Plain English explanation
         st.info(rec.explanation, icon="💡")
 
-        # S/R context badges
+        # Context badges
         tags = []
+        if opt.earnings_in_window:
+            tags.append("🗓️ Earnings in Window — score penalized 35%")
         if opt.near_support:
             tags.append("🟢 Near Support")
         if opt.near_resistance:
@@ -211,6 +222,9 @@ def render_option_table(result: ScreenerResult) -> None:
             "Strike":     st.column_config.NumberColumn(format="$%.2f"),
             "Premium":    st.column_config.NumberColumn(format="$%.2f"),
             "Break-even": st.column_config.NumberColumn(format="$%.2f"),
+            "Theta":      st.column_config.NumberColumn(format="$%.4f"),
+            "Vega":       st.column_config.NumberColumn(format="$%.4f"),
             "Score":      st.column_config.ProgressColumn(min_value=0, max_value=100),
+            "Earnings":   st.column_config.TextColumn(help="⚠️ Earnings event before expiration"),
         },
     )

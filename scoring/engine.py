@@ -242,6 +242,8 @@ def _to_dataframe(scored: list[ScoredOption], strategy: Strategy) -> pd.DataFram
             "Premium": round(s.premium, 2),
             "Ann. Return": f"{s.annualized_return * 100:.1f}%",
             "Delta": round(abs(c.delta), 3) if c.delta is not None else "—",
+            "Theta": round(c.theta, 4) if c.theta is not None else "—",
+            "Vega": round(c.vega, 4) if c.vega is not None else "—",
             "IV": f"{c.implied_volatility * 100:.1f}%" if c.implied_volatility else "—",
             "OI": c.open_interest,
             "Spread %": f"{c.bid_ask_spread_pct * 100:.1f}%",
@@ -249,6 +251,7 @@ def _to_dataframe(scored: list[ScoredOption], strategy: Strategy) -> pd.DataFram
             "Break-even": round(s.break_even, 2),
             "Score": round(s.score, 1),
             "Near S/R": ("S" if s.near_support else "") + ("R" if s.near_resistance else ""),
+            "Earnings": "⚠️" if s.earnings_in_window else "",
         }
         if strategy == Strategy.COVERED_CALL:
             row["Above Basis"] = (

@@ -18,6 +18,7 @@ IV rank defaults to 50 (neutral) when 52-week IV data is unavailable.
 from __future__ import annotations
 
 import math
+from datetime import date
 from typing import Optional
 
 from strategies.models import (
@@ -233,6 +234,7 @@ def score_cash_secured_puts(
     params: FilterParams,
     iv_52w_high: Optional[float] = None,
     iv_52w_low: Optional[float] = None,
+    earnings_date: Optional[str] = None,
 ) -> list[ScoredOption]:
     """
     Score each put option and return a filtered, sorted list of ScoredOption.
@@ -294,6 +296,18 @@ def score_cash_secured_puts(
         elif regime.trade_bias == "caution":
             composite *= 0.75
 
+        # Earnings penalty: binary event within the expiration window elevates risk
+        earnings_in_window = False
+        if earnings_date:
+            try:
+                ed = date.fromisoformat(earnings_date)
+                exp = date.fromisoformat(c.expiration)
+                if ed <= exp:
+                    earnings_in_window = True
+                    composite *= 0.65
+            except Exception:
+                pass
+
         near_sup = any(is_near_level(c.strike, s) for s in support_levels)
         near_res = any(is_near_level(c.strike, r) for r in resistance_levels)
 
@@ -314,6 +328,7 @@ def score_cash_secured_puts(
                 near_support=near_sup,
                 near_resistance=near_res,
                 above_cost_basis=None,
+                earnings_in_window=earnings_in_window,
             )
         )
 

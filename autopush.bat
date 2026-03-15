@@ -18,7 +18,7 @@ if not exist ".git" (
     echo.
     echo Fix: Run these commands:
     echo   git init
-    echo   git remote add origin https://github.com/YOUR_USERNAME/options-engine.git
+    echo   git remote add origin https://github.com/exos777/options-engine.git
     echo.
     pause
     exit /b 1
@@ -30,24 +30,20 @@ if %ERRORLEVEL% NEQ 0 (
     echo ERROR: GitHub not connected yet!
     echo.
     echo Fix: Run this command:
-    echo   git remote add origin https://github.com/YOUR_USERNAME/options-engine.git
+    echo   git remote add origin https://github.com/exos777/options-engine.git
     echo.
     pause
     exit /b 1
 )
 
-:: Check for changes
+:: Show current status
 echo Checking for changes...
 git status --short
 echo.
 
-git diff --quiet
-git diff --cached --quiet
-git status --porcelain > nul 2>&1
-
-for /f "delims=" %%i in ('git status --porcelain') do (
-    set HASCHANGES=1
-)
+:: Check if there are any changes
+set HASCHANGES=
+for /f "delims=" %%i in ('git status --porcelain') do set HASCHANGES=1
 
 if not defined HASCHANGES (
     echo No changes detected - already up to date!
@@ -63,14 +59,14 @@ if not defined HASCHANGES (
 echo Staging files...
 git add .
 
-:: Commit with simple message
+:: Commit
 git commit -m "Auto-backup"
 
-:: Push to GitHub
+:: Push to GitHub using master branch
 echo.
 echo Pushing to GitHub...
 echo.
-git push origin main
+git push origin master
 
 if %ERRORLEVEL% == 0 (
     echo.
@@ -87,10 +83,8 @@ if %ERRORLEVEL% == 0 (
     echo   ERROR - Push Failed!
     echo ============================================
     echo.
-    echo Most likely: GitHub credentials expired.
-    echo.
-    echo Fix: Run this manually:
-    echo   git push origin main
+    echo Try running manually:
+    echo   git push origin master
     echo.
     echo ERROR - Push failed >> "%LOGFILE%"
 )
@@ -103,7 +97,7 @@ echo ============================================
 if exist "%LOGFILE%" (
     powershell -command "Get-Content '%LOGFILE%' | Select-Object -Last 5"
 ) else (
-    echo   No history yet - this is your first run!
+    echo   No history yet!
 )
 echo ============================================
 echo.

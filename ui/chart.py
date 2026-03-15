@@ -51,6 +51,10 @@ def _label_color(label_str: str) -> str:
 # Public builder
 # ---------------------------------------------------------------------------
 
+_COL_EM_FILL = "rgba(255,165,0,0.08)"   # light orange shaded zone
+_COL_EM_LINE = "rgba(255,165,0,0.70)"   # orange dashed boundary lines
+
+
 def build_price_chart(
     full_ind: FullIndicators,
     support_levels: list[SupportResistanceLevel],
@@ -59,6 +63,7 @@ def build_price_chart(
     ticker: str,
     expiration: str,
     current_price: float,
+    expected_move: float = 0.0,
 ) -> go.Figure:
     """
     Build and return the three-panel Plotly figure.
@@ -168,6 +173,42 @@ def build_price_chart(
             fig.add_annotation(x=x1, y=rl.price, text=f"  R ${rl.price:.2f}",
                                 showarrow=False, font=dict(color=_COL_RESIST, size=10),
                                 xanchor="left", row=1, col=1)
+
+    # ------------------------------------------------------------------ #
+    # Expected move zone (±1σ shaded orange region)
+    # ------------------------------------------------------------------ #
+    if expected_move > 0:
+        em_upper = current_price + expected_move
+        em_lower = current_price - expected_move
+
+        # Shaded fill between upper and lower bounds
+        fig.add_trace(
+            go.Scatter(
+                x=list(df_index) + list(df_index[::-1]),
+                y=[em_upper] * len(df_index) + [em_lower] * len(df_index),
+                fill="toself",
+                fillcolor=_COL_EM_FILL,
+                line=dict(width=0),
+                showlegend=False,
+                hoverinfo="skip",
+                name="1σ EM Zone",
+            ),
+            row=1, col=1,
+        )
+        # Upper bound dashed line
+        fig.add_shape(type="line", x0=x0, x1=x1, y0=em_upper, y1=em_upper,
+                      line=dict(color=_COL_EM_LINE, width=1.5, dash="dash"), row=1, col=1)
+        fig.add_annotation(x=x1, y=em_upper,
+                           text=f"  1σ Upper ${em_upper:.2f}",
+                           showarrow=False, font=dict(color=_COL_EM_LINE, size=10),
+                           xanchor="left", row=1, col=1)
+        # Lower bound dashed line
+        fig.add_shape(type="line", x0=x0, x1=x1, y0=em_lower, y1=em_lower,
+                      line=dict(color=_COL_EM_LINE, width=1.5, dash="dash"), row=1, col=1)
+        fig.add_annotation(x=x1, y=em_lower,
+                           text=f"  1σ Lower ${em_lower:.2f}",
+                           showarrow=False, font=dict(color=_COL_EM_LINE, size=10),
+                           xanchor="left", row=1, col=1)
 
     # Current price reference line
     fig.add_shape(type="line", x0=x0, x1=x1, y0=current_price, y1=current_price,

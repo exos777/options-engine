@@ -40,25 +40,28 @@ from indicators.support_resistance import is_near_level
 
 _WEIGHTS: dict[RiskProfile, dict[str, float]] = {
     RiskProfile.CONSERVATIVE: {
-        "premium": 0.15,
-        "delta":   0.30,
-        "liquidity": 0.25,
-        "chart":   0.25,
-        "basis":   0.05,
+        "premium":        0.13,
+        "delta":          0.26,
+        "liquidity":      0.22,
+        "chart":          0.22,
+        "basis":          0.05,
+        "expected_move":  0.12,
     },
     RiskProfile.BALANCED: {
-        "premium": 0.20,
-        "delta":   0.25,
-        "liquidity": 0.20,
-        "chart":   0.20,
-        "basis":   0.15,
+        "premium":        0.17,
+        "delta":          0.22,
+        "liquidity":      0.17,
+        "chart":          0.17,
+        "basis":          0.13,
+        "expected_move":  0.14,
     },
     RiskProfile.AGGRESSIVE: {
-        "premium": 0.30,
-        "delta":   0.20,
-        "liquidity": 0.15,
-        "chart":   0.20,
-        "basis":   0.15,
+        "premium":        0.26,
+        "delta":          0.17,
+        "liquidity":      0.13,
+        "chart":          0.18,
+        "basis":          0.13,
+        "expected_move":  0.13,
     },
 }
 
@@ -161,6 +164,32 @@ def _chart_score(
     return raw * multiplier
 
 
+def _expected_move_score(
+    strike: float,
+    current_price: float,
+    expected_move: float,
+) -> float:
+    """
+    Reward covered call strikes outside the expected move range.
+
+    Upper bound = current_price + expected_move
+    strike above upper_bound → outside EM → safer → high score
+    strike inside EM         → risky      → low score
+    """
+    if expected_move <= 0:
+        return 50.0
+
+    upper_bound = current_price + expected_move
+    distance_beyond = strike - upper_bound
+
+    if distance_beyond >= 0:
+        pct_beyond = distance_beyond / expected_move
+        return min(100.0, 60.0 + pct_beyond * 200)
+    else:
+        pct_inside = abs(distance_beyond) / expected_move
+        return max(0.0, 60.0 - pct_inside * 120)
+
+
 def _basis_score(
     strike: float,
     cost_basis: Optional[float],
@@ -222,6 +251,7 @@ def score_covered_calls(
     resistance_levels: list[SupportResistanceLevel],
     params: FilterParams,
     earnings_date: Optional[str] = None,
+    expected_move: Optional[float] = None,
 ) -> list[ScoredOption]:
     """
     Score each call option contract and return a list of ScoredOption,
@@ -267,14 +297,21 @@ def score_covered_calls(
         ls = _liquidity_score(c.open_interest, c.bid_ask_spread_pct)
         cs = _chart_score(c.strike, current_price, indicators, regime, resistance_levels)
         bs = _basis_score(c.strike, params.cost_basis, premium, params.allow_below_basis)
+        em = expected_move if expected_move is not None else (
+            current_price * c.implied_volatility * math.sqrt(max(dte, 1) / 365)
+            if c.implied_volatility
+            else indicators.atr_14 * math.sqrt(max(dte, 1))
+        )
+        ems = _expected_move_score(c.strike, current_price, em)
 
         # --- Composite score ---
         composite = (
-            weights["premium"]   * ps
-            + weights["delta"]   * ds
-            + weights["liquidity"] * ls
-            + weights["chart"]   * cs
-            + weights["basis"]   * bs
+            weights["premium"]         * ps
+            + weights["delta"]         * ds
+            + weights["liquidity"]     * ls
+            + weights["chart"]         * cs
+            + weights["basis"]         * bs
+            + weights["expected_move"] * ems
         )
 
         # Apply bearish / skip penalty at the score level (not a hard filter)

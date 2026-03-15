@@ -252,6 +252,17 @@ def run_pipeline(ticker: str, expiration: str, params: FilterParams):
     progress.progress(82, text="Scoring options…")
     dte = dp.days_to_expiration(expiration)
 
+    # Compute single expected move from avg IV of the relevant chain
+    import math as _math
+    _chain = calls if params.strategy == Strategy.COVERED_CALL else puts
+    _ivs = [c.implied_volatility for c in _chain if c.implied_volatility]
+    _avg_iv = sum(_ivs) / len(_ivs) if _ivs else None
+    expected_move = (
+        quote.price * _avg_iv * _math.sqrt(max(dte, 1) / 365)
+        if _avg_iv
+        else indicators.atr_14 * _math.sqrt(max(dte, 1))
+    )
+
     if params.strategy == Strategy.COVERED_CALL:
         scored = score_covered_calls(
             calls, quote.price, dte,
@@ -259,6 +270,7 @@ def run_pipeline(ticker: str, expiration: str, params: FilterParams):
             support_lvls, resistance_lvls,
             params,
             earnings_date=quote.earnings_date,
+            expected_move=expected_move,
         )
     else:
         scored = score_cash_secured_puts(
@@ -267,6 +279,7 @@ def run_pipeline(ticker: str, expiration: str, params: FilterParams):
             support_lvls, resistance_lvls,
             params,
             earnings_date=quote.earnings_date,
+            expected_move=expected_move,
         )
 
     progress.progress(92, text="Building recommendations…")
@@ -290,7 +303,7 @@ def run_pipeline(ticker: str, expiration: str, params: FilterParams):
 
     progress.progress(100, text="Done.")
     progress.empty()
-    return result, hist_df, full_ind
+    return result, hist_df, full_ind, expected_move
 
 
 # ---------------------------------------------------------------------------
@@ -329,10 +342,11 @@ active_expiration = (
 if run_button and ticker_input and active_expiration:
     try:
         with st.spinner(""):
-            result, hist_df, full_ind = run_pipeline(ticker_input, active_expiration, filter_params)
+            result, hist_df, full_ind, expected_move = run_pipeline(ticker_input, active_expiration, filter_params)
         st.session_state["result"] = result
         st.session_state["hist_df"] = hist_df
         st.session_state["full_ind"] = full_ind
+        st.session_state["expected_move"] = expected_move
     except ValueError as e:
         st.error(str(e), icon="🚨")
         st.stop()
@@ -347,6 +361,7 @@ if run_button and ticker_input and active_expiration:
 result: object = st.session_state.get("result")
 hist_df = st.session_state.get("hist_df")
 full_ind = st.session_state.get("full_ind")
+expected_move: float = st.session_state.get("expected_move", 0.0)
 
 if result is None:
     st.info(
@@ -372,12 +387,13 @@ if full_ind is not None and hist_df is not None and not hist_df.empty:
         ticker=result.quote.ticker,
         expiration=result.expiration,
         current_price=result.quote.price,
+        expected_move=expected_move,
     )
     st.plotly_chart(fig, use_container_width=True)
 
 # C. Recommendations
 st.divider()
-rec_ui.render_recommendations(result, strategy)
+rec_ui.render_recommendations(result, strategy, expected_move=expected_move)
 
 # D. Ranked Option Table
 st.divider()

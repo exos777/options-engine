@@ -97,7 +97,12 @@ def render_market_overview(result: ScreenerResult, strategy: Strategy) -> None:
 # Single recommendation card
 # ---------------------------------------------------------------------------
 
-def render_recommendation_card(rec: Recommendation, strategy: Strategy) -> None:
+def render_recommendation_card(
+    rec: Recommendation,
+    strategy: Strategy,
+    current_price: float = 0.0,
+    expected_move: float = 0.0,
+) -> None:
     """Render one recommendation inside a styled expander card."""
     c = rec.option.contract
     opt = rec.option
@@ -158,6 +163,28 @@ def render_recommendation_card(rec: Recommendation, strategy: Strategy) -> None:
         # Plain English explanation
         st.info(rec.explanation, icon="💡")
 
+        # Expected move context
+        if expected_move > 0 and current_price > 0:
+            em_pct = expected_move / current_price * 100
+            if strategy == Strategy.COVERED_CALL:
+                boundary = current_price + expected_move
+                outside = c.strike >= boundary
+                buffer = c.strike - boundary
+                bound_label = "Upper bound"
+            else:
+                boundary = current_price - expected_move
+                outside = c.strike <= boundary
+                buffer = boundary - c.strike
+                bound_label = "Lower bound"
+            em_status = "✅ Outside EM" if outside else "⚠️ Inside EM"
+            buf_label = "Buffer" if outside else "Exposure"
+            st.caption(
+                f"Expected Move: ±${expected_move:.2f} (±{em_pct:.1f}%)  ·  "
+                f"{bound_label}: ${boundary:.2f}  ·  "
+                f"Strike: **{em_status}**  ·  "
+                f"{buf_label}: ${abs(buffer):.2f}"
+            )
+
         # Context badges
         tags = []
         if opt.earnings_in_window:
@@ -178,7 +205,11 @@ def render_recommendation_card(rec: Recommendation, strategy: Strategy) -> None:
 # Full recommendations section
 # ---------------------------------------------------------------------------
 
-def render_recommendations(result: ScreenerResult, strategy: Strategy) -> None:
+def render_recommendations(
+    result: ScreenerResult,
+    strategy: Strategy,
+    expected_move: float = 0.0,
+) -> None:
     """Render all recommendations, or a no-trade message if list is empty."""
     st.subheader("Recommendations")
 
@@ -198,7 +229,11 @@ def render_recommendations(result: ScreenerResult, strategy: Strategy) -> None:
         return
 
     for rec in result.recommendations:
-        render_recommendation_card(rec, strategy)
+        render_recommendation_card(
+            rec, strategy,
+            current_price=result.quote.price,
+            expected_move=expected_move,
+        )
 
 
 # ---------------------------------------------------------------------------

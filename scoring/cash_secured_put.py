@@ -41,28 +41,31 @@ from indicators.support_resistance import is_near_level
 
 _WEIGHTS: dict[RiskProfile, dict[str, float]] = {
     RiskProfile.CONSERVATIVE: {
-        "premium":   0.13,
-        "delta":     0.28,
-        "liquidity": 0.22,
-        "chart":     0.22,
-        "basis":     0.05,
-        "iv_rank":   0.10,
+        "premium":        0.11,
+        "delta":          0.25,
+        "liquidity":      0.19,
+        "chart":          0.19,
+        "basis":          0.05,
+        "iv_rank":        0.09,
+        "expected_move":  0.12,
     },
     RiskProfile.BALANCED: {
-        "premium":   0.17,
-        "delta":     0.22,
-        "liquidity": 0.18,
-        "chart":     0.18,
-        "basis":     0.13,
-        "iv_rank":   0.12,
+        "premium":        0.14,
+        "delta":          0.20,
+        "liquidity":      0.15,
+        "chart":          0.15,
+        "basis":          0.12,
+        "iv_rank":        0.10,
+        "expected_move":  0.14,
     },
     RiskProfile.AGGRESSIVE: {
-        "premium":   0.25,
-        "delta":     0.18,
-        "liquidity": 0.13,
-        "chart":     0.18,
-        "basis":     0.13,
-        "iv_rank":   0.13,
+        "premium":        0.22,
+        "delta":          0.15,
+        "liquidity":      0.11,
+        "chart":          0.15,
+        "basis":          0.12,
+        "iv_rank":        0.12,
+        "expected_move":  0.13,
     },
 }
 
@@ -159,6 +162,38 @@ def _iv_rank_score(current_iv: float, iv_52w_high: float, iv_52w_low: float) -> 
     return min(100.0, iv_rank)
 
 
+def _expected_move_score(
+    strike: float,
+    current_price: float,
+    expected_move: float,
+) -> float:
+    """
+    Reward strikes outside the expected move range.
+
+    Expected move defines the 1-sigma range:
+    lower_bound = current_price - expected_move
+
+    strike below lower_bound → outside EM → safer → high score
+    strike inside EM         → risky      → low score
+    """
+    lower_bound = current_price - expected_move
+
+    if expected_move <= 0:
+        return 50.0  # neutral if no IV data
+
+    # How far outside the expected move is the strike?
+    distance_beyond = lower_bound - strike
+
+    if distance_beyond >= 0:
+        # Outside expected move — reward it
+        pct_beyond = distance_beyond / expected_move
+        return min(100.0, 60.0 + pct_beyond * 200)
+    else:
+        # Inside expected move — penalize it
+        pct_inside = abs(distance_beyond) / expected_move
+        return max(0.0, 60.0 - pct_inside * 120)
+
+
 def _buy_price_score(
     strike: float,
     desired_buy_price: Optional[float],
@@ -235,6 +270,7 @@ def score_cash_secured_puts(
     iv_52w_high: Optional[float] = None,
     iv_52w_low: Optional[float] = None,
     earnings_date: Optional[str] = None,
+    expected_move: Optional[float] = None,
 ) -> list[ScoredOption]:
     """
     Score each put option and return a filtered, sorted list of ScoredOption.
@@ -280,15 +316,23 @@ def score_cash_secured_puts(
             if (c.implied_volatility and iv_52w_high is not None and iv_52w_low is not None)
             else 50.0
         )
+        # 1-sigma expected move: use externally supplied value, else per-contract
+        em = expected_move if expected_move is not None else (
+            current_price * c.implied_volatility * math.sqrt(max(dte, 1) / 365)
+            if c.implied_volatility
+            else indicators.atr_14 * math.sqrt(max(dte, 1))
+        )
+        ems = _expected_move_score(c.strike, current_price, em)
 
         # --- Composite score ---
         composite = (
-            weights["premium"]     * ps
-            + weights["delta"]     * ds
-            + weights["liquidity"] * ls
-            + weights["chart"]     * cs
-            + weights["basis"]     * bs
-            + weights["iv_rank"]   * ivs
+            weights["premium"]        * ps
+            + weights["delta"]        * ds
+            + weights["liquidity"]    * ls
+            + weights["chart"]        * cs
+            + weights["basis"]        * bs
+            + weights["iv_rank"]      * ivs
+            + weights["expected_move"] * ems
         )
 
         if regime.trade_bias == "skip":

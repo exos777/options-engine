@@ -145,58 +145,73 @@ def render_recommendation_card(
             f"${c.vega:.4f}" if c.vega is not None else "—",
         )
 
-        iv_rank_part = (
-            f"  IV Rank: {opt.iv_rank_score:.0f}"
-            if opt.iv_rank_score != 50.0
-            else ""
-        )
         st.caption(
             f"Distance from price: **{opt.distance_pct * 100:.1f}%**  ·  "
             f"Score breakdown — Premium: {opt.premium_score:.0f}  "
+            f"Theta: {opt.theta_score:.0f}  "
             f"Delta: {opt.delta_score:.0f}  "
             f"Liquidity: {opt.liquidity_score:.0f}  "
             f"Chart: {opt.chart_score:.0f}  "
             f"Basis: {opt.basis_score:.0f}"
-            f"{iv_rank_part}"
         )
 
         # Plain English explanation
         st.info(rec.explanation, icon="💡")
 
-        # Expected move context
+        # Seller's summary
+        ss1, ss2, ss3, ss4 = st.columns(4)
+
+        # Theta income
+        ss1.metric(
+            "Theta / day",
+            f"${abs(c.theta):.3f}" if c.theta else "—",
+            help="Daily premium decay earned (per contract = ×100)",
+        )
+        ss1.metric("Ann. Yield", f"{opt.annualized_return * 100:.1f}%")
+
+        # Expected move
+        em_status = "—"
+        em_boundary = "—"
+        em_buffer = "—"
         if expected_move > 0 and current_price > 0:
             em_pct = expected_move / current_price * 100
             if strategy == Strategy.COVERED_CALL:
                 boundary = current_price + expected_move
                 outside = c.strike >= boundary
                 buffer = c.strike - boundary
-                bound_label = "Upper bound"
             else:
                 boundary = current_price - expected_move
                 outside = c.strike <= boundary
                 buffer = boundary - c.strike
-                bound_label = "Lower bound"
             em_status = "✅ Outside EM" if outside else "⚠️ Inside EM"
-            buf_label = "Buffer" if outside else "Exposure"
-            st.caption(
-                f"Expected Move: ±${expected_move:.2f} (±{em_pct:.1f}%)  ·  "
-                f"{bound_label}: ${boundary:.2f}  ·  "
-                f"Strike: **{em_status}**  ·  "
-                f"{buf_label}: ${abs(buffer):.2f}"
-            )
+            em_boundary = f"${boundary:.2f} (±{em_pct:.1f}%)"
+            em_buffer = f"${abs(buffer):.2f} {'buffer' if outside else 'exposure'}"
 
-        # Context badges
+        ss2.metric("EM Boundary", em_boundary)
+        ss2.metric("Strike vs EM", em_status)
+
+        # Vega risk
+        vega_risk = "—"
+        if c.vega:
+            av = abs(c.vega)
+            vega_risk = "Low" if av <= 0.15 else ("Medium" if av <= 0.30 else "High ⚠️")
+        ss3.metric("Vega Risk", vega_risk, help="IV expansion risk for short positions")
+        ss3.metric("EM Buffer", em_buffer)
+
+        # Earnings + basis
+        earnings_status = "🚨 In Window" if opt.earnings_in_window else "✅ Clear"
+        ss4.metric("Earnings", earnings_status)
+        if opt.above_cost_basis is True:
+            ss4.metric("vs Cost Basis", "✅ Above")
+        elif opt.above_cost_basis is False:
+            ss4.metric("vs Cost Basis", "⚠️ Below")
+
+        # S/R context badges
         tags = []
-        if opt.earnings_in_window:
-            tags.append("🗓️ Earnings in Window — score penalized 35%")
         if opt.near_support:
             tags.append("🟢 Near Support")
         if opt.near_resistance:
             tags.append("🔴 Near Resistance")
-        if opt.above_cost_basis is True:
-            tags.append("✅ Above Cost Basis")
-        elif opt.above_cost_basis is False:
-            tags.append("⚠️ Below Cost Basis")
         if tags:
             st.caption("  ".join(tags))
 

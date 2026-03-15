@@ -51,16 +51,53 @@ def _regime_phrase(regime: RegimeResult) -> str:
     return phrases.get(regime.primary, "the chart is mixed")
 
 
+def _vega_label(vega: float | None) -> str:
+    if vega is None:
+        return "Unknown"
+    av = abs(vega)
+    if av <= 0.15:
+        return "Low"
+    if av <= 0.30:
+        return "Medium"
+    return "High ⚠️"
+
+
+def _em_context(
+    strike: float,
+    current_price: float,
+    expected_move: float,
+    is_call: bool,
+) -> str:
+    if expected_move <= 0:
+        return ""
+    if is_call:
+        boundary = current_price + expected_move
+        outside = strike >= boundary
+        label = "Upper EM boundary"
+    else:
+        boundary = current_price - expected_move
+        outside = strike <= boundary
+        label = "Lower EM boundary"
+    status = "✅ outside" if outside else "⚠️ inside"
+    return f"Strike is {status} the expected move ({label}: ${boundary:.2f})."
+
+
 def _explain_covered_call(
     option: ScoredOption,
     regime: RegimeResult,
     indicators: TechnicalIndicators,
     label: RecommendationLabel,
+    expected_move: float = 0.0,
+    current_price: float = 0.0,
 ) -> str:
     c = option.contract
     distance = option.distance_pct * 100
     ann_ret = option.annualized_return * 100
     regime_phrase = _regime_phrase(regime)
+    theta_note = f"  Theta: ${abs(c.theta):.3f}/day." if c.theta else ""
+    vega_note = f"  Vega risk: {_vega_label(c.vega)}." if c.vega else ""
+    em_note = _em_context(c.strike, current_price, expected_move, is_call=True)
+    em_part = f"  {em_note}" if em_note else ""
 
     if regime.trade_bias == "skip":
         return (
@@ -71,43 +108,33 @@ def _explain_covered_call(
         )
 
     base = f"The ${c.strike:.2f} call is {distance:.1f}% above the current price"
-    premium_note = f"and earns ${option.premium:.2f} in premium ({ann_ret:.1f}% annualised)"
+    income = f"earning ${option.premium:.2f} premium ({ann_ret:.1f}% annualised)"
+    be = f"Break-even: ${option.break_even:.2f}."
 
     if label == RecommendationLabel.SAFEST_INCOME:
-        delta_note = (
-            f" with a low delta of {abs(c.delta):.2f}" if c.delta else ""
-        )
+        delta_note = f"  Delta: {abs(c.delta):.2f}." if c.delta else ""
         return (
-            f"{base}{delta_note}, {premium_note}. "
-            f"This is the safest income option because {regime_phrase} "
-            "and the strike gives the stock plenty of room to run before assignment. "
-            f"Break-even on the downside is ${option.break_even:.2f}."
+            f"{base}, {income}.{delta_note}{theta_note}{vega_note}{em_part}  "
+            f"{be}  Safest income: {regime_phrase}, plenty of room before assignment."
         )
 
     if label == RecommendationLabel.BEST_BALANCE:
-        chart_note = ""
-        if option.near_resistance:
-            chart_note = " The strike sits near resistance, making assignment at a reasonable price likely."
+        chart_note = "  Strike near resistance — assignment at a reasonable level." if option.near_resistance else ""
         return (
-            f"{base}, {premium_note}. "
-            f"This is the best balance of premium, safety, and chart context because {regime_phrase}.{chart_note} "
-            f"Break-even is ${option.break_even:.2f}."
+            f"{base}, {income}.{theta_note}{vega_note}{em_part}{chart_note}  "
+            f"{be}  Best balance of premium, theta, and safety because {regime_phrase}."
         )
 
     if label == RecommendationLabel.MAX_PREMIUM:
         caution = ""
-        if option.contract.delta and abs(option.contract.delta) > 0.35:
-            caution = (
-                f" Note: delta of {abs(c.delta):.2f} means higher assignment risk — "
-                "suitable if you are comfortable being called away."
-            )
+        if c.delta and abs(c.delta) > 0.35:
+            caution = f"  Note: delta {abs(c.delta):.2f} — higher assignment risk."
         return (
-            f"{base}, {premium_note} — the highest available premium. "
-            f"Chart context: {regime_phrase}.{caution} "
-            f"Break-even is ${option.break_even:.2f}."
+            f"{base}, {income} — highest available yield.{caution}{theta_note}{vega_note}{em_part}  "
+            f"{be}  Chart context: {regime_phrase}."
         )
 
-    return f"{base}, {premium_note}."
+    return f"{base}, {income}.  {be}"
 
 
 def _explain_csp(
@@ -115,53 +142,53 @@ def _explain_csp(
     regime: RegimeResult,
     indicators: TechnicalIndicators,
     label: RecommendationLabel,
+    expected_move: float = 0.0,
+    current_price: float = 0.0,
 ) -> str:
     c = option.contract
     distance = option.distance_pct * 100
     ann_ret = option.annualized_return * 100
     regime_phrase = _regime_phrase(regime)
+    theta_note = f"  Theta: ${abs(c.theta):.3f}/day." if c.theta else ""
+    vega_note = f"  Vega risk: {_vega_label(c.vega)}." if c.vega else ""
+    em_note = _em_context(c.strike, current_price, expected_move, is_call=False)
+    em_part = f"  {em_note}" if em_note else ""
+    be = f"Net cost basis if assigned: ${option.break_even:.2f}."
 
     if regime.trade_bias == "skip":
         return (
             f"No strong trade recommended — {regime_phrase}. "
-            f"The ${c.strike:.2f} put offers ${option.premium:.2f} premium ({ann_ret:.1f}% annualised), "
-            "but the chart suggests increased downside risk. "
-            "Consider waiting for a reversal or stronger support confirmation."
+            f"The ${c.strike:.2f} put offers ${option.premium:.2f} ({ann_ret:.1f}% annualised), "
+            "but the chart suggests elevated downside risk. "
+            "Consider waiting for a reversal or stronger support."
         )
 
     base = f"The ${c.strike:.2f} put is {distance:.1f}% below the current price"
-    premium_note = f"collecting ${option.premium:.2f} ({ann_ret:.1f}% annualised)"
-    breakeven_note = f"Net cost basis if assigned: ${option.break_even:.2f}"
+    income = f"collecting ${option.premium:.2f} ({ann_ret:.1f}% annualised)"
 
     if label == RecommendationLabel.SAFEST_INCOME:
-        sup_note = " The strike is near a support zone, giving a historically defended entry." if option.near_support else ""
+        sup_note = "  Strike near support — historically defended entry." if option.near_support else ""
         return (
-            f"{base}, {premium_note}.{sup_note} "
-            f"This is the safest entry because {regime_phrase} and assignment "
-            f"at this level represents a meaningful discount. {breakeven_note}."
+            f"{base}, {income}.{theta_note}{vega_note}{em_part}{sup_note}  "
+            f"{be}  Safest income: {regime_phrase}, assignment at a meaningful discount."
         )
 
     if label == RecommendationLabel.BEST_BALANCE:
         return (
-            f"{base}, {premium_note}. "
-            f"Best balance of premium and safety because {regime_phrase}. "
-            f"The strike respects chart structure without sacrificing too much income. "
-            f"{breakeven_note}."
+            f"{base}, {income}.{theta_note}{vega_note}{em_part}  "
+            f"{be}  Best balance of premium, theta, and safety because {regime_phrase}."
         )
 
     if label == RecommendationLabel.MAX_PREMIUM:
         caution = ""
         if c.delta and abs(c.delta) > 0.35:
-            caution = (
-                f" Higher delta ({abs(c.delta):.2f}) means assignment is more likely — "
-                "only suitable if you want to own the stock near this level."
-            )
+            caution = f"  Delta {abs(c.delta):.2f} — assignment more likely, only suitable if willing to own."
         return (
-            f"{base}, {premium_note} — the highest available income.{caution} "
-            f"Chart context: {regime_phrase}. {breakeven_note}."
+            f"{base}, {income} — highest available income.{caution}{theta_note}{vega_note}{em_part}  "
+            f"{be}  Chart context: {regime_phrase}."
         )
 
-    return f"{base}, {premium_note}. {breakeven_note}."
+    return f"{base}, {income}.  {be}"
 
 
 # ---------------------------------------------------------------------------
@@ -173,31 +200,33 @@ def _pick_recommendations(
     strategy: Strategy,
     regime: RegimeResult,
     indicators: TechnicalIndicators,
+    expected_move: float = 0.0,
+    current_price: float = 0.0,
 ) -> list[Recommendation]:
     """
-    Pick three recommendations with distinct labels from the scored list.
+    Pick three seller-focused recommendations with distinct labels.
 
-    - Best Balance  : highest composite score
-    - Safest Income : lowest delta (most OTM) among top-10
-    - Max Premium   : highest annualised return among top-10
+    - Best Balance  : highest composite score (best risk-adjusted income)
+    - Safest Income : lowest assignment risk (lowest delta) from top-10
+    - Max Premium   : highest annualised yield from top-10 (with caution if risky)
     """
     if not scored:
         return []
 
     top10 = scored[:10]
 
-    # Best Balance: top scorer
+    # Best Balance: highest composite score
     best_balance = top10[0]
 
-    # Safest Income: lowest absolute delta (or greatest distance_pct if delta unknown)
+    # Safest Income: lowest absolute delta → least assignment risk
     def safest_key(o: ScoredOption) -> float:
         if o.contract.delta is not None:
             return abs(o.contract.delta)
-        return -o.distance_pct  # proxy: further OTM = safer
+        return -o.distance_pct  # fallback: further OTM = safer
 
     safest = min(top10, key=safest_key)
 
-    # Max Premium: highest annualised return
+    # Max Premium: highest annualized income
     max_prem = max(top10, key=lambda o: o.annualized_return)
 
     explain_fn = _explain_covered_call if strategy == Strategy.COVERED_CALL else _explain_csp
@@ -211,7 +240,6 @@ def _pick_recommendations(
         (RecommendationLabel.MAX_PREMIUM, max_prem),
     ]:
         if option.contract.strike in seen_strikes:
-            # Avoid duplicate strikes — find next best candidate
             candidates = [o for o in top10 if o.contract.strike not in seen_strikes]
             if not candidates:
                 continue
@@ -221,7 +249,11 @@ def _pick_recommendations(
             Recommendation(
                 label=label,
                 option=option,
-                explanation=explain_fn(option, regime, indicators, label),
+                explanation=explain_fn(
+                    option, regime, indicators, label,
+                    expected_move=expected_move,
+                    current_price=current_price,
+                ),
             )
         )
 
@@ -310,11 +342,15 @@ def run_screener(
     scored_options : already filtered and sorted ScoredOption list
     warnings       : any pre-computed warning strings (earnings, etc.)
     """
-    recs = _pick_recommendations(scored_options, params.strategy, regime, indicators)
-    df = _to_dataframe(scored_options, params.strategy)
-
     avg_iv = _avg_iv(scored_options)
     exp_move = _expected_move(quote.price, avg_iv, dte)
+
+    recs = _pick_recommendations(
+        scored_options, params.strategy, regime, indicators,
+        expected_move=exp_move,
+        current_price=quote.price,
+    )
+    df = _to_dataframe(scored_options, params.strategy)
 
     # Regime-level warning
     w = list(warnings or [])

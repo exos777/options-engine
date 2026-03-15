@@ -94,27 +94,22 @@ class TestIVRankScore:
         for s in scored:
             assert s.iv_rank_score == pytest.approx(50.0)
 
-    def test_high_iv_rank_boosts_score_vs_low(
+    def test_iv_rank_score_stored_when_52w_data_provided(
         self, sample_puts, bullish_indicators, bullish_regime,
         support_levels, resistance_levels, balanced_csp_params
     ):
-        high_iv = score_cash_secured_puts(
+        # iv_rank is computed and stored in ScoredOption but is not a
+        # composite weight in the seller-focused scoring model.
+        scored = score_cash_secured_puts(
             sample_puts, 108.0, 7,
             bullish_indicators, bullish_regime,
             support_levels, resistance_levels,
             balanced_csp_params,
             iv_52w_high=0.50, iv_52w_low=0.10,
         )
-        low_iv = score_cash_secured_puts(
-            sample_puts, 108.0, 7,
-            bullish_indicators, bullish_regime,
-            support_levels, resistance_levels,
-            balanced_csp_params,
-            iv_52w_high=0.50, iv_52w_low=0.45,  # current IV near low
-        )
-        avg_high = sum(s.score for s in high_iv) / len(high_iv)
-        avg_low  = sum(s.score for s in low_iv)  / len(low_iv)
-        assert avg_high > avg_low
+        # iv_rank_score should be computed (not default 50) when IV data provided
+        non_neutral = [s for s in scored if s.iv_rank_score != 50.0]
+        assert len(non_neutral) > 0
 
 
 class TestBuyPriceScore:

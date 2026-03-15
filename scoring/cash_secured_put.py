@@ -40,32 +40,32 @@ from indicators.support_resistance import is_near_level
 # ---------------------------------------------------------------------------
 
 _WEIGHTS: dict[RiskProfile, dict[str, float]] = {
+    # Conservative: safety first — delta and liquidity dominate
     RiskProfile.CONSERVATIVE: {
-        "premium":        0.11,
-        "delta":          0.25,
-        "liquidity":      0.19,
-        "chart":          0.19,
-        "basis":          0.05,
-        "iv_rank":        0.09,
-        "expected_move":  0.12,
+        "premium":   0.15,
+        "theta":     0.15,
+        "delta":     0.30,
+        "liquidity": 0.20,
+        "chart":     0.15,
+        "basis":     0.05,
     },
+    # Balanced: income generation with controlled assignment risk
     RiskProfile.BALANCED: {
-        "premium":        0.14,
-        "delta":          0.20,
-        "liquidity":      0.15,
-        "chart":          0.15,
-        "basis":          0.12,
-        "iv_rank":        0.10,
-        "expected_move":  0.14,
+        "premium":   0.25,
+        "theta":     0.20,
+        "delta":     0.20,
+        "liquidity": 0.15,
+        "chart":     0.10,
+        "basis":     0.10,
     },
+    # Aggressive: maximize premium and theta income
     RiskProfile.AGGRESSIVE: {
-        "premium":        0.22,
-        "delta":          0.15,
-        "liquidity":      0.11,
-        "chart":          0.15,
-        "basis":          0.12,
-        "iv_rank":        0.12,
-        "expected_move":  0.13,
+        "premium":   0.35,
+        "theta":     0.25,
+        "delta":     0.15,
+        "liquidity": 0.10,
+        "chart":     0.10,
+        "basis":     0.05,
     },
 }
 
@@ -152,6 +152,44 @@ def _chart_score(
             raw = max(0.0, raw - 10)
 
     return raw * multiplier
+
+
+def _theta_score(theta: Optional[float], risk_profile: RiskProfile) -> float:
+    """
+    Higher absolute theta = more daily decay income = better for sellers.
+    theta is negative for sold options; we score on abs(theta).
+    """
+    if theta is None:
+        return 50.0
+    targets = {
+        RiskProfile.CONSERVATIVE: 0.05,
+        RiskProfile.BALANCED:     0.10,
+        RiskProfile.AGGRESSIVE:   0.20,
+    }
+    target = targets[risk_profile]
+    k = 2.5
+    score = 100 * (1 - math.exp(-k * abs(theta) / target))
+    return min(100.0, max(0.0, score))
+
+
+def _vega_penalty(vega: Optional[float], risk_profile: RiskProfile) -> float:
+    """
+    Return a composite multiplier (0.60–1.0).
+    High vega = risk of IV expansion hurting the short position.
+    """
+    if vega is None:
+        return 1.0
+    thresholds = {
+        RiskProfile.CONSERVATIVE: 0.15,
+        RiskProfile.BALANCED:     0.25,
+        RiskProfile.AGGRESSIVE:   0.35,
+    }
+    threshold = thresholds[risk_profile]
+    abs_vega = abs(vega)
+    if abs_vega <= threshold:
+        return 1.0
+    excess = abs_vega - threshold
+    return max(0.60, 1.0 - excess * 2.0)
 
 
 def _iv_rank_score(current_iv: float, iv_52w_high: float, iv_52w_low: float) -> float:
@@ -307,40 +345,35 @@ def score_cash_secured_puts(
 
         # --- Sub-scores ---
         ps = _premium_score(ann_return, params.risk_profile)
+        ts = _theta_score(c.theta, params.risk_profile)
         ds = _delta_score(c.delta, max_delta)
         ls = _liquidity_score(c.open_interest, c.bid_ask_spread_pct)
         cs = _chart_score(c.strike, current_price, indicators, regime, support_levels)
         bs = _buy_price_score(c.strike, params.desired_buy_price, premium)
+        # iv_rank computed for storage but not weighted (kept for future use)
         ivs = (
             _iv_rank_score(c.implied_volatility, iv_52w_high, iv_52w_low)
             if (c.implied_volatility and iv_52w_high is not None and iv_52w_low is not None)
             else 50.0
         )
-        # 1-sigma expected move: use externally supplied value, else per-contract
-        em = expected_move if expected_move is not None else (
-            current_price * c.implied_volatility * math.sqrt(max(dte, 1) / 365)
-            if c.implied_volatility
-            else indicators.atr_14 * math.sqrt(max(dte, 1))
-        )
-        ems = _expected_move_score(c.strike, current_price, em)
 
-        # --- Composite score ---
+        # --- Weighted composite ---
         composite = (
-            weights["premium"]        * ps
-            + weights["delta"]        * ds
-            + weights["liquidity"]    * ls
-            + weights["chart"]        * cs
-            + weights["basis"]        * bs
-            + weights["iv_rank"]      * ivs
-            + weights["expected_move"] * ems
+            weights["premium"]   * ps
+            + weights["theta"]   * ts
+            + weights["delta"]   * ds
+            + weights["liquidity"] * ls
+            + weights["chart"]   * cs
+            + weights["basis"]   * bs
         )
 
+        # --- Regime modifier ---
         if regime.trade_bias == "skip":
             composite *= 0.35
         elif regime.trade_bias == "caution":
             composite *= 0.75
 
-        # Earnings penalty: binary event within the expiration window elevates risk
+        # --- Earnings penalty (binary event risk) ---
         earnings_in_window = False
         if earnings_date:
             try:
@@ -351,6 +384,20 @@ def score_cash_secured_puts(
                     composite *= 0.65
             except Exception:
                 pass
+
+        # --- Expected move modifier (outside EM = bonus, inside = penalty) ---
+        em = expected_move if expected_move is not None else (
+            current_price * c.implied_volatility * math.sqrt(max(dte, 1) / 365)
+            if c.implied_volatility
+            else indicators.atr_14 * math.sqrt(max(dte, 1))
+        )
+        ems = _expected_move_score(c.strike, current_price, em)
+        composite *= (0.80 + (ems / 100.0) * 0.30)
+
+        # --- Vega risk modifier ---
+        composite *= _vega_penalty(c.vega, params.risk_profile)
+
+        composite = min(100.0, composite)
 
         near_sup = any(is_near_level(c.strike, s) for s in support_levels)
         near_res = any(is_near_level(c.strike, r) for r in resistance_levels)
@@ -364,6 +411,7 @@ def score_cash_secured_puts(
                 break_even=break_even,
                 score=round(composite, 2),
                 premium_score=round(ps, 2),
+                theta_score=round(ts, 2),
                 delta_score=round(ds, 2),
                 liquidity_score=round(ls, 2),
                 chart_score=round(cs, 2),

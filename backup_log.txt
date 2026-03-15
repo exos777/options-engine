@@ -1,2 +1,3 @@
 ERROR - Push failed 
 ERROR - Push failed 
+SUCCESS - Pushed to GitHub 

@@ -29,5 +29,9 @@ htmlcov/
 .DS_Store
 Thumbs.db
 
+# Secrets
+.env
+*.env
+
 # Logs
 *.log

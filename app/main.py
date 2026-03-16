@@ -41,6 +41,25 @@ st.set_page_config(
 st.title("📈 Weekly Options Screener")
 st.caption("Covered Calls & Cash-Secured Puts — powered by yfinance")
 
+st.markdown("""
+<style>
+/* Quick ticker buttons */
+div[data-testid="column"] > div > div > div > button {
+    background-color: #21262d;
+    color: #58a6ff;
+    border: 1px solid #30363d;
+    border-radius: 6px;
+    font-weight: 600;
+    font-size: 13px;
+}
+div[data-testid="column"] > div > div > div > button:hover {
+    background-color: #58a6ff;
+    color: #0d1117;
+    border-color: #58a6ff;
+}
+</style>
+""", unsafe_allow_html=True)
+
 
 # ---------------------------------------------------------------------------
 # Sidebar — Input Panel
@@ -53,11 +72,44 @@ with st.sidebar:
 
     st.divider()
 
+    # --- Ticker history ---
+    if "ticker_history" not in st.session_state:
+        st.session_state["ticker_history"] = ["TSLA", "MSFT", "NVDA"]
+
+    history = st.session_state.get("ticker_history", ["TSLA", "MSFT", "NVDA"])
+    st.caption("Recent tickers:")
+    btn_col1, btn_col2, btn_col3 = st.columns(3)
+    with btn_col1:
+        if st.button(
+            history[0] if len(history) > 0 else "TSLA",
+            use_container_width=True,
+            key="quick_ticker_1",
+        ):
+            st.session_state["quick_select"] = history[0] if len(history) > 0 else "TSLA"
+    with btn_col2:
+        if st.button(
+            history[1] if len(history) > 1 else "MSFT",
+            use_container_width=True,
+            key="quick_ticker_2",
+        ):
+            st.session_state["quick_select"] = history[1] if len(history) > 1 else "MSFT"
+    with btn_col3:
+        if st.button(
+            history[2] if len(history) > 2 else "NVDA",
+            use_container_width=True,
+            key="quick_ticker_3",
+        ):
+            st.session_state["quick_select"] = history[2] if len(history) > 2 else "NVDA"
+
+    default_ticker = st.session_state.pop(
+        "quick_select",
+        st.session_state.get("last_ticker", "TSLA"),
+    )
     ticker_input = st.text_input(
         "Ticker Symbol",
-        value="AAPL",
+        value=default_ticker,
         max_chars=10,
-        help="Enter a US stock ticker (e.g. AAPL, MSFT, SPY)",
+        help="Enter a US stock ticker (e.g. TSLA, MSFT, NVDA)",
     ).upper().strip()
 
     strategy_choice = st.radio(
@@ -347,6 +399,16 @@ if run_button and ticker_input and active_expiration:
         st.session_state["hist_df"] = hist_df
         st.session_state["full_ind"] = full_ind
         st.session_state["expected_move"] = expected_move
+
+        # Update ticker history
+        _hist = st.session_state.get("ticker_history", ["TSLA", "MSFT", "NVDA"])
+        if ticker_input not in _hist:
+            _hist.insert(0, ticker_input)
+            st.session_state["ticker_history"] = _hist[:3]
+        elif _hist[0] != ticker_input:
+            _hist.remove(ticker_input)
+            _hist.insert(0, ticker_input)
+            st.session_state["ticker_history"] = _hist[:3]
     except ValueError as e:
         st.error(str(e), icon="🚨")
         st.stop()

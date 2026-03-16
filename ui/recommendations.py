@@ -147,95 +147,20 @@ def render_market_overview(
     else:
         st.caption(f"**Expiration:** {result.expiration}  ·  **DTE:** {result.dte}")
 
+    # ── TTM Squeeze alert ───────────────────────────────────────────────────
+    if getattr(ind, "squeeze_on", False):
+        st.warning(
+            "⚡ ⚡ Squeeze ACTIVE — Bollinger Bands inside Keltner Channels. "
+            "Big move imminent. Consider waiting for squeeze release before selling.",
+            icon="⚡",
+        )
+
     # ── Earnings warning ────────────────────────────────────────────────────
     if q.earnings_date:
         from data.provider import earnings_warning
         ew = earnings_warning(q, result.expiration)
         if ew:
             st.error(ew, icon="🗓️")
-
-
-# ---------------------------------------------------------------------------
-# Signal Dashboard (collapsed expander)
-# ---------------------------------------------------------------------------
-
-def render_signal_dashboard(
-    result: ScreenerResult,
-    full_ind: FullIndicators | None = None,
-) -> None:
-    """Collapsed expander with all 9 indicator statuses + TTM Squeeze alert."""
-    ind = result.indicators
-    q = result.quote
-    regime = result.regime.primary
-
-    # Pull MACD and BB from full_ind if available
-    macd_line = 0.0
-    hist_rising = False
-    pct_b = 0.5
-    if full_ind is not None:
-        md = full_ind.macd_data
-        macd_line = float(md.macd_line.iloc[-1])
-        last_hist = float(md.histogram.iloc[-1])
-        prev_hist = float(md.histogram.iloc[-2])
-        hist_rising = last_hist > prev_hist
-        pb = full_ind.bb.pct_b.iloc[-1]
-        if not pd.isna(pb):
-            pct_b = float(pb)
-
-    adx = getattr(ind, "adx_14", 0.0) or 0.0
-    vwap = getattr(ind, "vwap", 0.0) or 0.0
-    squeeze_on = getattr(ind, "squeeze_on", False)
-
-    def _sig(val: float) -> str:
-        return "🟢" if val > 0 else "🔴" if val < 0 else "⚪"
-
-    rows = [
-        ("RSI (14)", f"{ind.rsi_14:.1f}",
-         _sig(30 - ind.rsi_14 if ind.rsi_14 < 50 else ind.rsi_14 - 70),
-         "Oversold" if ind.rsi_14 < 30 else "Overbought" if ind.rsi_14 > 70 else "Neutral"),
-        ("MACD", f"{macd_line:.2f}",
-         _sig(1 if (macd_line > 0 and hist_rising) else (-1 if (macd_line < 0 and not hist_rising) else 0)),
-         ("Positive + rising" if macd_line > 0 and hist_rising
-          else "Positive + falling" if macd_line > 0
-          else "Negative + rising" if hist_rising
-          else "Negative + falling")),
-        ("SMA 20", f"${ind.sma_20:.2f}",
-         _sig(q.price - ind.sma_20),
-         f"Price {'above' if q.price > ind.sma_20 else 'below'} SMA20"),
-        ("SMA 50", f"${ind.sma_50:.2f}",
-         _sig(q.price - ind.sma_50),
-         f"Price {'above' if q.price > ind.sma_50 else 'below'} SMA50"),
-        ("Bollinger %B", f"{pct_b:.2f}",
-         _sig(-1 if pct_b > 0.8 else (1 if pct_b < 0.2 else 0)),
-         "Upper band" if pct_b > 0.8 else "Lower band" if pct_b < 0.2 else "Mid-band"),
-        ("ADX (14)", f"{adx:.1f}",
-         "⚪" if adx < 20 else ("🟢" if regime == ChartRegime.BULLISH else "🔴" if regime == ChartRegime.BEARISH else "⚪"),
-         "Ranging" if adx < 20 else "Trending strong" if adx > 30 else "Trending"),
-        ("VWAP", f"${vwap:.2f}" if vwap > 0 else "N/A",
-         _sig(q.price - vwap) if vwap > 0 else "⚪",
-         f"Price {'above' if q.price > vwap else 'below'} VWAP" if vwap > 0 else "—"),
-        ("TTM Squeeze", "ON 🔴" if squeeze_on else "OFF 🟢",
-         "🔴" if squeeze_on else "🟢",
-         "Compression — await release" if squeeze_on else "Volatility releasing"),
-        ("Regime", regime.value,
-         _sig({"Bullish": 1, "Near Support": 1, "Neutral": 0,
-               "Near Resistance": -1, "Overextended": -1, "Bearish": -1}.get(regime.value, 0)),
-         result.regime.description.split("|")[0].strip()),
-    ]
-
-    with st.expander("📊 Signal Dashboard", expanded=False):
-        if squeeze_on:
-            st.warning(
-                "⚡ Squeeze ACTIVE — Bollinger Bands inside Keltner Channels. "
-                "Big move imminent. Consider waiting for squeeze release before selling.",
-                icon="⚡",
-            )
-        df = pd.DataFrame(rows, columns=["Indicator", "Value", "Signal", "Context"])
-        st.dataframe(df, hide_index=True, use_container_width=True)
-        st.caption(
-            f"SMA20 ${ind.sma_20:.2f}  ·  SMA50 ${ind.sma_50:.2f}  ·  "
-            f"ATR est. weekly ${ind.weekly_atr_est:.2f}"
-        )
 
 
 # ---------------------------------------------------------------------------

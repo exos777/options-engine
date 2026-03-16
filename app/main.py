@@ -45,17 +45,23 @@ st.markdown("""
 <style>
 /* Quick ticker buttons */
 div[data-testid="column"] > div > div > div > button {
-    background-color: #21262d;
-    color: #58a6ff;
-    border: 1px solid #30363d;
+    background-color: #1a4a2e;
+    color: #3fb950;
+    border: 1px solid #3fb950;
     border-radius: 6px;
-    font-weight: 600;
+    font-weight: 700;
     font-size: 13px;
 }
 div[data-testid="column"] > div > div > div > button:hover {
-    background-color: #58a6ff;
+    background-color: #3fb950;
     color: #0d1117;
-    border-color: #58a6ff;
+    border-color: #3fb950;
+}
+div[data-testid="column"] > div > div > div > button:focus {
+    background-color: #3fb950;
+    color: #0d1117;
+    border-color: #3fb950;
+    box-shadow: 0 0 0 2px #1a4a2e;
 }
 </style>
 """, unsafe_allow_html=True)
@@ -77,29 +83,26 @@ with st.sidebar:
         st.session_state["ticker_history"] = ["TSLA", "MSFT", "NVDA"]
 
     history = st.session_state.get("ticker_history", ["TSLA", "MSFT", "NVDA"])
+    active_ticker = st.session_state.get("last_ticker", "TSLA")
+
+    label1 = f"✓ {history[0]}" if len(history) > 0 and history[0] == active_ticker else (history[0] if len(history) > 0 else "TSLA")
+    label2 = f"✓ {history[1]}" if len(history) > 1 and history[1] == active_ticker else (history[1] if len(history) > 1 else "MSFT")
+    label3 = f"✓ {history[2]}" if len(history) > 2 and history[2] == active_ticker else (history[2] if len(history) > 2 else "NVDA")
+
     st.caption("Recent tickers:")
     btn_col1, btn_col2, btn_col3 = st.columns(3)
     with btn_col1:
-        if st.button(
-            history[0] if len(history) > 0 else "TSLA",
-            use_container_width=True,
-            key="quick_ticker_1",
-        ):
+        if st.button(label1, use_container_width=True, key="quick_ticker_1"):
             st.session_state["quick_select"] = history[0] if len(history) > 0 else "TSLA"
+            st.session_state["auto_run"] = True
     with btn_col2:
-        if st.button(
-            history[1] if len(history) > 1 else "MSFT",
-            use_container_width=True,
-            key="quick_ticker_2",
-        ):
+        if st.button(label2, use_container_width=True, key="quick_ticker_2"):
             st.session_state["quick_select"] = history[1] if len(history) > 1 else "MSFT"
+            st.session_state["auto_run"] = True
     with btn_col3:
-        if st.button(
-            history[2] if len(history) > 2 else "NVDA",
-            use_container_width=True,
-            key="quick_ticker_3",
-        ):
+        if st.button(label3, use_container_width=True, key="quick_ticker_3"):
             st.session_state["quick_select"] = history[2] if len(history) > 2 else "NVDA"
+            st.session_state["auto_run"] = True
 
     default_ticker = st.session_state.pop(
         "quick_select",
@@ -362,7 +365,9 @@ def run_pipeline(ticker: str, expiration: str, params: FilterParams):
 # Fetch expirations on first load or ticker change
 # ---------------------------------------------------------------------------
 
-if run_button or (
+auto_run = st.session_state.pop("auto_run", False)
+
+if run_button or auto_run or (
     ticker_input
     and ticker_input != st.session_state.get("last_ticker")
 ):
@@ -374,7 +379,7 @@ if run_button or (
             st.session_state["default_exp"] = default
             st.session_state["last_ticker"] = ticker_input
             # Trigger rerun so the selectbox populates before we run the pipeline
-            if not run_button:
+            if not run_button and not auto_run:
                 st.rerun()
         except ValueError as e:
             st.error(f"Could not load expirations: {e}", icon="🚨")
@@ -391,7 +396,7 @@ active_expiration = (
 # Run pipeline when button pressed
 # ---------------------------------------------------------------------------
 
-if run_button and ticker_input and active_expiration:
+if (run_button or auto_run) and ticker_input and active_expiration:
     try:
         with st.spinner(""):
             result, hist_df, full_ind, expected_move = run_pipeline(ticker_input, active_expiration, filter_params)
@@ -404,11 +409,10 @@ if run_button and ticker_input and active_expiration:
         _hist = st.session_state.get("ticker_history", ["TSLA", "MSFT", "NVDA"])
         if ticker_input not in _hist:
             _hist.insert(0, ticker_input)
-            st.session_state["ticker_history"] = _hist[:3]
         elif _hist[0] != ticker_input:
             _hist.remove(ticker_input)
             _hist.insert(0, ticker_input)
-            st.session_state["ticker_history"] = _hist[:3]
+        st.session_state["ticker_history"] = _hist[:3]
     except ValueError as e:
         st.error(str(e), icon="🚨")
         st.stop()

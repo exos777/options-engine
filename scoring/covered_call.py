@@ -4,13 +4,17 @@ Covered call scoring engine.
 For each call option in the chain, calculates all relevant metrics and
 produces a composite score 0–100 that balances:
 
-  - Premium / annualised return          (weight: 20%)
-  - Delta / assignment risk              (weight: 25%)
-  - Liquidity (OI + bid-ask spread)      (weight: 20%)
-  - Chart alignment                      (weight: 20%)
-  - Cost basis compliance                (weight: 15%)
+  - Premium / annualised return
+  - Theta / daily decay income
+  - Delta / assignment risk
+  - Liquidity (OI + bid-ask spread)
+  - Chart alignment
+  - Expected move (outside EM = safer)
+  - Cost basis compliance
 
 Weights are adjusted based on the user's risk profile.
+All modifiers (regime, earnings, vega) are applied as a single capped
+penalty to prevent excessive stacking.
 """
 
 from __future__ import annotations
@@ -35,36 +39,39 @@ from indicators.support_resistance import is_near_level
 
 
 # ---------------------------------------------------------------------------
-# Weight profiles
+# Weight profiles (must sum to 1.0)
 # ---------------------------------------------------------------------------
 
 _WEIGHTS: dict[RiskProfile, dict[str, float]] = {
     # Conservative: safety first — delta and liquidity dominate
     RiskProfile.CONSERVATIVE: {
-        "premium":   0.15,
-        "theta":     0.15,
-        "delta":     0.30,
-        "liquidity": 0.20,
-        "chart":     0.15,
+        "premium":   0.12,
+        "theta":     0.12,
+        "delta":     0.28,
+        "liquidity": 0.18,
+        "chart":     0.12,
+        "em":        0.13,
         "basis":     0.05,
     },
     # Balanced: income generation with controlled risk
     RiskProfile.BALANCED: {
-        "premium":   0.25,
-        "theta":     0.20,
-        "delta":     0.20,
-        "liquidity": 0.15,
-        "chart":     0.10,
+        "premium":   0.22,
+        "theta":     0.18,
+        "delta":     0.18,
+        "liquidity": 0.12,
+        "chart":     0.08,
+        "em":        0.12,
         "basis":     0.10,
     },
     # Aggressive: maximize premium and theta income
     RiskProfile.AGGRESSIVE: {
-        "premium":   0.35,
-        "theta":     0.25,
-        "delta":     0.15,
-        "liquidity": 0.10,
-        "chart":     0.10,
-        "basis":     0.05,
+        "premium":   0.28,
+        "theta":     0.22,
+        "delta":     0.13,
+        "liquidity": 0.08,
+        "chart":     0.08,
+        "em":        0.14,
+        "basis":     0.07,
     },
 }
 
@@ -82,19 +89,21 @@ _MAX_DELTA_DEFAULT: dict[RiskProfile, float] = {
 
 def _premium_score(annualised_return: float, risk_profile: RiskProfile) -> float:
     """
-    Map annualised return → score.
-    Conservative: peak at ~15% APY; Balanced ~25%; Aggressive ~40%+
+    Map annualised return → score using an S-curve (logistic).
+
+    Targets represent "excellent" premium for weekly sellers:
+      Conservative ~25% APY, Balanced ~40%, Aggressive ~60%+
+    The curve midpoint is at 50% of target (score=50), giving good
+    differentiation in the 15–60% APY range where weeklies operate.
     """
     targets = {
-        RiskProfile.CONSERVATIVE: 0.15,
-        RiskProfile.BALANCED:     0.25,
-        RiskProfile.AGGRESSIVE:   0.40,
+        RiskProfile.CONSERVATIVE: 0.25,
+        RiskProfile.BALANCED:     0.40,
+        RiskProfile.AGGRESSIVE:   0.60,
     }
     target = targets[risk_profile]
-    # Logistic-style score: 100 × (1 - exp(-k × r/target))
-    # k chosen so that at r == target we get ~63 points
-    k = 2.5
-    score = 100 * (1 - math.exp(-k * annualised_return / target))
+    k = 8.0
+    score = 100.0 / (1.0 + math.exp(-k * (annualised_return / target - 0.5)))
     return min(100.0, max(0.0, score))
 
 
@@ -167,23 +176,31 @@ def _chart_score(
     return raw * multiplier
 
 
-def _theta_score(theta: Optional[float], risk_profile: RiskProfile) -> float:
+def _theta_score(
+    theta: Optional[float],
+    risk_profile: RiskProfile,
+    current_price: float = 100.0,
+) -> float:
     """
     Higher absolute theta = more daily decay income = better for sellers.
     theta is negative for sold options; we score on abs(theta).
 
-    Uses the same logistic curve as premium_score, targeted at daily decay.
+    Targets are price-relative (basis points per day) so the curve
+    differentiates meaningfully across stock price ranges.
     """
     if theta is None:
         return 50.0  # neutral when Greeks unavailable
+    # Theta as basis points of stock price per day
+    theta_bps = abs(theta) / current_price * 10000 if current_price > 0 else 0
+    # Targets in bps/day (calibrated for weekly OTM options)
     targets = {
-        RiskProfile.CONSERVATIVE: 0.05,  # $0.05/day target
-        RiskProfile.BALANCED:     0.10,  # $0.10/day target
-        RiskProfile.AGGRESSIVE:   0.20,  # $0.20/day target
+        RiskProfile.CONSERVATIVE: 3.0,   # e.g. $0.06/day on $200 stock
+        RiskProfile.BALANCED:     5.0,   # e.g. $0.10/day on $200 stock
+        RiskProfile.AGGRESSIVE:   8.0,   # e.g. $0.16/day on $200 stock
     }
     target = targets[risk_profile]
-    k = 2.5
-    score = 100 * (1 - math.exp(-k * abs(theta) / target))
+    k = 2.0
+    score = 100 * (1 - math.exp(-k * theta_bps / target))
     return min(100.0, max(0.0, score))
 
 
@@ -216,12 +233,12 @@ def _expected_move_score(
     Reward covered call strikes outside the expected move range.
 
     Upper bound = current_price + expected_move
-    strike above upper_bound → outside EM → safer → high score (→ multiplier > 1.0)
-    strike inside EM         → risky      → low score (→ multiplier < 1.0)
-    Returns 0–100; converted to a composite multiplier by caller.
+    strike above upper_bound → outside EM → safer → high score
+    strike inside EM         → risky      → low score
+    Returns 0–100 (used as a weighted sub-score, not a multiplier).
     """
     if expected_move <= 0:
-        return 60.0  # neutral — maps to multiplier ~1.0
+        return 50.0  # neutral when EM data unavailable
 
     upper_bound = current_price + expected_move
     distance_beyond = strike - upper_bound
@@ -303,7 +320,14 @@ def score_covered_calls(
 
     Contracts that fail hard filters (spread, OI, premium, delta) are excluded.
     """
-    weights = _WEIGHTS[params.risk_profile]
+    # Adaptive weight redistribution: if no cost basis, redistribute
+    # the "basis" weight proportionally to other factors
+    weights = dict(_WEIGHTS[params.risk_profile])
+    if params.cost_basis is None:
+        basis_w = weights.pop("basis")
+        total = sum(weights.values())
+        for k in weights:
+            weights[k] += basis_w * (weights[k] / total)
     max_delta = params.max_delta or _MAX_DELTA_DEFAULT[params.risk_profile]
     scored: list[ScoredOption] = []
 
@@ -335,31 +359,44 @@ def score_covered_calls(
         distance_pct = (c.strike - current_price) / current_price
         break_even = current_price - premium  # break-even on downside
 
+        # --- Expected move ---
+        em = expected_move if expected_move is not None else (
+            current_price * c.implied_volatility * math.sqrt(max(dte, 1) / 365)
+            if c.implied_volatility
+            else indicators.atr_14 * math.sqrt(max(dte, 1))
+        )
+
         # --- Sub-scores ---
         ps = _premium_score(ann_return, params.risk_profile)
-        ts = _theta_score(c.theta, params.risk_profile)
+        ts = _theta_score(c.theta, params.risk_profile, current_price)
         ds = _delta_score(c.delta, max_delta)
         ls = _liquidity_score(c.open_interest, c.bid_ask_spread_pct)
         cs = _chart_score(c.strike, current_price, indicators, regime, resistance_levels)
+        ems = _expected_move_score(c.strike, current_price, em)
         bs = _basis_score(c.strike, params.cost_basis, premium, params.allow_below_basis)
 
-        # --- Weighted composite ---
+        # --- Weighted composite (EM is now a sub-score, not a multiplier) ---
         composite = (
             weights["premium"]   * ps
             + weights["theta"]   * ts
             + weights["delta"]   * ds
             + weights["liquidity"] * ls
             + weights["chart"]   * cs
-            + weights["basis"]   * bs
+            + weights["em"]      * ems
         )
+        if "basis" in weights:
+            composite += weights["basis"] * bs
 
-        # --- Regime modifier ---
+        # --- Capped risk modifiers (prevent excessive stacking) ---
+        penalty = 1.0
+
+        # Regime penalty
         if regime.trade_bias == "skip":
-            composite *= 0.35
+            penalty *= 0.35
         elif regime.trade_bias == "caution":
-            composite *= 0.75
+            penalty *= 0.75
 
-        # --- Earnings penalty (binary event risk) ---
+        # Earnings penalty (binary event risk)
         earnings_in_window = False
         if earnings_date:
             try:
@@ -367,22 +404,19 @@ def score_covered_calls(
                 exp = date.fromisoformat(c.expiration)
                 if ed <= exp:
                     earnings_in_window = True
-                    composite *= 0.65
+                    penalty *= 0.65
             except Exception:
                 pass
 
-        # --- Expected move modifier (outside EM = bonus, inside = penalty) ---
-        em = expected_move if expected_move is not None else (
-            current_price * c.implied_volatility * math.sqrt(max(dte, 1) / 365)
-            if c.implied_volatility
-            else indicators.atr_14 * math.sqrt(max(dte, 1))
-        )
-        ems = _expected_move_score(c.strike, current_price, em)
-        composite *= (0.80 + (ems / 100.0) * 0.30)
+        # Vega risk penalty
+        penalty *= _vega_penalty(c.vega, params.risk_profile)
 
-        # --- Vega risk modifier ---
-        composite *= _vega_penalty(c.vega, params.risk_profile)
+        # Floor: never reduce by more than 55% (except "skip" regime
+        # which is an explicit do-not-trade signal)
+        if regime.trade_bias != "skip":
+            penalty = max(0.45, penalty)
 
+        composite *= penalty
         composite = min(100.0, composite)
 
         near_sup = any(is_near_level(c.strike, s) for s in support_levels)
@@ -402,6 +436,7 @@ def score_covered_calls(
                 liquidity_score=round(ls, 2),
                 chart_score=round(cs, 2),
                 basis_score=round(bs, 2),
+                expected_move_score=round(ems, 2),
                 near_support=near_sup,
                 near_resistance=near_res,
                 above_cost_basis=(

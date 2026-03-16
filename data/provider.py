@@ -45,6 +45,7 @@ warnings.filterwarnings("ignore", message="Unverified HTTPS request")
 import pandas as pd
 import yfinance as yf
 
+from greeks.black_scholes import backfill_greeks
 from strategies.models import OptionContract, Quote
 
 logger = logging.getLogger(__name__)
@@ -177,7 +178,30 @@ def get_option_chain(
     except Exception as exc:
         raise ValueError(f"Could not fetch option chain for '{symbol}' at {expiration}: {exc}") from exc
 
+    # Spot price and DTE for Black-Scholes backfill
+    spot_price = _safe_float(getattr(t.fast_info, "last_price", None))
+    if spot_price == 0.0:
+        hist = t.history(period="2d")
+        spot_price = float(hist["Close"].iloc[-1]) if not hist.empty else 0.0
+    dte = days_to_expiration(expiration)
+
     def _parse_row(row: pd.Series, option_type: str) -> OptionContract:
+        iv = _safe_float(row.get("impliedVolatility")) or None
+        delta = _safe_float(row.get("delta")) or None
+        gamma = _safe_float(row.get("gamma")) or None
+        theta = _safe_float(row.get("theta")) or None
+        vega = _safe_float(row.get("vega")) or None
+
+        # Backfill missing Greeks via Black-Scholes when IV is available
+        if iv and spot_price > 0 and any(g is None for g in (delta, gamma, theta, vega)):
+            strike = _safe_float(row.get("strike"))
+            bs = backfill_greeks(strike, spot_price, dte, iv, option_type)
+            if bs is not None:
+                delta = delta if delta is not None else bs.delta
+                gamma = gamma if gamma is not None else bs.gamma
+                theta = theta if theta is not None else bs.theta
+                vega = vega if vega is not None else bs.vega
+
         return OptionContract(
             strike=_safe_float(row.get("strike")),
             expiration=expiration,
@@ -187,11 +211,11 @@ def get_option_chain(
             last=_safe_float(row.get("lastPrice")),
             volume=_safe_int(row.get("volume")),
             open_interest=_safe_int(row.get("openInterest")),
-            implied_volatility=_safe_float(row.get("impliedVolatility")) or None,
-            delta=_safe_float(row.get("delta")) or None,
-            gamma=_safe_float(row.get("gamma")) or None,
-            theta=_safe_float(row.get("theta")) or None,
-            vega=_safe_float(row.get("vega")) or None,
+            implied_volatility=iv,
+            delta=delta,
+            gamma=gamma,
+            theta=theta,
+            vega=vega,
         )
 
     calls = [_parse_row(row, "call") for _, row in chain.calls.iterrows()]

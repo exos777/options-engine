@@ -172,7 +172,10 @@ def neutral_regime() -> RegimeResult:
 # Option contract fixtures
 # ---------------------------------------------------------------------------
 
-def _call(strike: float, bid: float, ask: float, oi: int, delta: float, iv: float) -> OptionContract:
+def _call(
+    strike: float, bid: float, ask: float, oi: int, delta: float, iv: float,
+    theta: float | None = None, vega: float | None = None,
+) -> OptionContract:
     return OptionContract(
         strike=strike,
         expiration="2024-12-27",
@@ -184,10 +187,15 @@ def _call(strike: float, bid: float, ask: float, oi: int, delta: float, iv: floa
         open_interest=oi,
         implied_volatility=iv,
         delta=delta,
+        theta=theta,
+        vega=vega,
     )
 
 
-def _put(strike: float, bid: float, ask: float, oi: int, delta: float, iv: float) -> OptionContract:
+def _put(
+    strike: float, bid: float, ask: float, oi: int, delta: float, iv: float,
+    theta: float | None = None, vega: float | None = None,
+) -> OptionContract:
     return OptionContract(
         strike=strike,
         expiration="2024-12-27",
@@ -199,6 +207,8 @@ def _put(strike: float, bid: float, ask: float, oi: int, delta: float, iv: float
         open_interest=oi,
         implied_volatility=iv,
         delta=delta,
+        theta=theta,
+        vega=vega,
     )
 
 
@@ -206,11 +216,11 @@ def _put(strike: float, bid: float, ask: float, oi: int, delta: float, iv: float
 def sample_calls() -> list[OptionContract]:
     """A realistic set of OTM call contracts around $108 spot."""
     return [
-        _call(108.0, 2.10, 2.30, 500,  0.48, 0.28),
-        _call(110.0, 1.40, 1.60, 800,  0.38, 0.27),
-        _call(112.0, 0.80, 0.95, 600,  0.27, 0.26),
-        _call(115.0, 0.35, 0.45, 300,  0.16, 0.25),
-        _call(118.0, 0.12, 0.18, 150,  0.08, 0.24),
+        _call(108.0, 2.10, 2.30, 500,  0.48, 0.28, theta=-0.15, vega=0.12),
+        _call(110.0, 1.40, 1.60, 800,  0.38, 0.27, theta=-0.12, vega=0.11),
+        _call(112.0, 0.80, 0.95, 600,  0.27, 0.26, theta=-0.08, vega=0.09),
+        _call(115.0, 0.35, 0.45, 300,  0.16, 0.25, theta=-0.04, vega=0.06),
+        _call(118.0, 0.12, 0.18, 150,  0.08, 0.24, theta=-0.02, vega=0.03),
     ]
 
 
@@ -218,11 +228,11 @@ def sample_calls() -> list[OptionContract]:
 def sample_puts() -> list[OptionContract]:
     """A realistic set of OTM put contracts around $108 spot."""
     return [
-        _put(107.0, 1.80, 2.00, 550, -0.46, 0.29),
-        _put(105.0, 1.20, 1.40, 750, -0.35, 0.28),
-        _put(103.0, 0.75, 0.90, 600, -0.26, 0.27),
-        _put(100.0, 0.40, 0.52, 400, -0.18, 0.26),
-        _put( 97.0, 0.18, 0.26, 200, -0.10, 0.25),
+        _put(107.0, 1.80, 2.00, 550, -0.46, 0.29, theta=-0.14, vega=0.12),
+        _put(105.0, 1.20, 1.40, 750, -0.35, 0.28, theta=-0.10, vega=0.10),
+        _put(103.0, 0.75, 0.90, 600, -0.26, 0.27, theta=-0.07, vega=0.08),
+        _put(100.0, 0.40, 0.52, 400, -0.18, 0.26, theta=-0.04, vega=0.05),
+        _put( 97.0, 0.18, 0.26, 200, -0.10, 0.25, theta=-0.02, vega=0.03),
     ]
 
 

@@ -15,7 +15,8 @@ from strategies.models import RiskProfile
 
 class TestPremiumScore:
     def test_zero_return_near_zero(self):
-        assert _premium_score(0.0, RiskProfile.BALANCED) == pytest.approx(0.0, abs=1.0)
+        score = _premium_score(0.0, RiskProfile.BALANCED)
+        assert score < 5  # S-curve: 0% return → near-zero score
 
     def test_high_return_approaches_100(self):
         assert _premium_score(1.5, RiskProfile.BALANCED) > 90
@@ -24,6 +25,12 @@ class TestPremiumScore:
         for r in [0.0, 0.1, 0.5, 2.0]:
             score = _premium_score(r, RiskProfile.BALANCED)
             assert 0 <= score <= 100
+
+    def test_differentiation_in_weekly_range(self):
+        """15% and 30% APY should produce meaningfully different scores."""
+        low = _premium_score(0.15, RiskProfile.BALANCED)
+        high = _premium_score(0.30, RiskProfile.BALANCED)
+        assert high - low > 10
 
 
 class TestDeltaScore:

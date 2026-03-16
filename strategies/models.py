@@ -169,6 +169,7 @@ class ScoredOption:
     basis_score: float        # 0 if n/a for CSPs
     iv_rank_score: float = 50.0   # 50 = neutral when 52w IV data unavailable
     theta_score: float = 50.0     # 50 = neutral when theta unavailable
+    expected_move_score: float = 50.0  # 50 = neutral when EM data unavailable
     # Explanatory fields
     near_support: bool = False
     near_resistance: bool = False

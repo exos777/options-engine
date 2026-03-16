@@ -7,11 +7,23 @@ Run with:
 
 from __future__ import annotations
 
+import importlib
 import sys
 import os
 
 # Ensure project root is on the path when running from the app/ subdirectory
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
+# Force-reload scoring modules to bust Streamlit Cloud's stale module cache.
+# Without this, cached .pyc from a prior deploy can shadow the current source.
+for _mod_name in [
+    "scoring.covered_call",
+    "scoring.cash_secured_put",
+    "scoring.engine",
+    "scoring.regime",
+]:
+    if _mod_name in sys.modules:
+        importlib.reload(sys.modules[_mod_name])
 
 import streamlit as st
 

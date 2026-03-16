@@ -78,15 +78,16 @@ def build_price_chart(
     df_index = full_ind.dates
 
     fig = make_subplots(
-        rows=3,
+        rows=4,
         cols=1,
         shared_xaxes=True,
         vertical_spacing=0.03,
-        row_heights=[0.55, 0.20, 0.25],
+        row_heights=[0.50, 0.18, 0.22, 0.10],
         subplot_titles=[
             f"{ticker}  –  Expiration {expiration}",
             "Volume",
             "MACD (12 / 26 / 9)",
+            "ADX (14)",
         ],
     )
 
@@ -305,11 +306,28 @@ def build_price_chart(
     )
 
     # ------------------------------------------------------------------ #
+    # Panel 4 — ADX
+    # ------------------------------------------------------------------ #
+    fig.add_trace(
+        go.Scatter(x=df_index, y=full_ind.adx14, mode="lines",
+                   name="ADX", line=dict(color="#f7c948", width=1.5)),
+        row=4, col=1,
+    )
+    # Reference lines at 20 (ranging) and 25 (trending)
+    fig.add_shape(type="line", x0=x0, x1=x1, y0=20, y1=20,
+                  line=dict(color="rgba(255,255,255,0.25)", width=1, dash="dot"), row=4, col=1)
+    fig.add_shape(type="line", x0=x0, x1=x1, y0=25, y1=25,
+                  line=dict(color="rgba(255,255,255,0.40)", width=1, dash="dot"), row=4, col=1)
+    fig.add_annotation(x=x1, y=25, text="  25", showarrow=False,
+                       font=dict(color="rgba(255,255,255,0.40)", size=9),
+                       xanchor="left", row=4, col=1)
+
+    # ------------------------------------------------------------------ #
     # Layout
     # ------------------------------------------------------------------ #
     fig.update_layout(
         template="plotly_dark",
-        height=680,
+        height=760,
         margin=dict(l=10, r=90, t=40, b=10),
         legend=dict(orientation="h", yanchor="bottom", y=1.01, xanchor="left", x=0),
         xaxis_rangeslider_visible=False,
@@ -318,5 +336,6 @@ def build_price_chart(
     fig.update_yaxes(title_text="Price ($)", row=1, col=1)
     fig.update_yaxes(title_text="Vol", row=2, col=1)
     fig.update_yaxes(title_text="MACD", row=3, col=1)
+    fig.update_yaxes(title_text="ADX", row=4, col=1)
 
     return fig

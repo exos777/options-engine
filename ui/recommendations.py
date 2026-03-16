@@ -47,8 +47,8 @@ def render_market_overview(result: ScreenerResult, strategy: Strategy) -> None:
     q = result.quote
     ind = result.indicators
 
-    # Price metrics row
-    col1, col2, col3, col4, col5, col6, col7 = st.columns(7)
+    # Price metrics row — exactly 5 columns, no clutter
+    col1, col2, col3, col4, col5 = st.columns(5)
 
     pct = q.change_pct * 100
     pct_label = f"{pct:+.2f}%"
@@ -58,16 +58,6 @@ def render_market_overview(result: ScreenerResult, strategy: Strategy) -> None:
     col3.metric("SMA 50", f"${ind.sma_50:.2f}")
     col4.metric("RSI (14)", f"{ind.rsi_14:.1f}")
     col5.metric("ATR (14)", f"${ind.atr_14:.2f}")
-
-    # ADX
-    adx_label = "Trending" if ind.adx_14 > 25 else ("Ranging" if ind.adx_14 < 20 else "Trans.")
-    col6.metric("ADX (14)", f"{ind.adx_14:.1f}", adx_label)
-
-    # VWAP vs Price
-    if ind.vwap > 0:
-        vwap_diff_pct = (q.price - ind.vwap) / ind.vwap * 100
-        vwap_label = f"{vwap_diff_pct:+.1f}% {'above' if vwap_diff_pct >= 0 else 'below'}"
-        col7.metric("vs VWAP", f"${ind.vwap:.2f}", vwap_label)
 
     st.caption(
         f"**Expiration:** {result.expiration}  ·  "
@@ -91,15 +81,6 @@ def render_market_overview(result: ScreenerResult, strategy: Strategy) -> None:
         delta_color=regime_delta_color,
     )
 
-    # TTM Squeeze warning
-    if ind.squeeze_on:
-        st.warning(
-            "TTM Squeeze is ON — Bollinger Bands are inside Keltner Channels. "
-            "Volatility compression in progress; premium may expand after breakout. "
-            "Consider waiting for squeeze release before selling.",
-            icon="🔴",
-        )
-
     # Warnings
     for w in result.warnings:
         st.warning(w, icon="⚠️")
@@ -110,6 +91,81 @@ def render_market_overview(result: ScreenerResult, strategy: Strategy) -> None:
         ew = earnings_warning(q, result.expiration)
         if ew:
             st.error(ew, icon="🗓️")
+
+
+# ---------------------------------------------------------------------------
+# Signal Dashboard (collapsed expander)
+# ---------------------------------------------------------------------------
+
+def render_signal_dashboard(result: ScreenerResult) -> None:
+    """Render collapsed Signal Dashboard expander with ADX, VWAP, TTM Squeeze."""
+    ind = result.indicators
+    q = result.quote
+
+    with st.expander("📊 Signal Dashboard", expanded=False):
+        c1, c2, c3, c4 = st.columns(4)
+
+        # RSI
+        rsi_v = ind.rsi_14
+        if rsi_v >= 70:
+            rsi_signal, rsi_color = "Overbought ⚠️", "inverse"
+        elif rsi_v <= 30:
+            rsi_signal, rsi_color = "Oversold 🔵", "normal"
+        else:
+            rsi_signal, rsi_color = "Neutral", "off"
+        c1.metric("RSI (14)", f"{rsi_v:.1f}", rsi_signal, delta_color=rsi_color)
+
+        # ADX
+        adx_v = ind.adx_14
+        if adx_v > 25:
+            adx_signal, adx_color = "Trending 📈", "off"
+        elif adx_v < 20:
+            adx_signal, adx_color = "Ranging ✅", "normal"
+        else:
+            adx_signal, adx_color = "Transitioning", "off"
+        c2.metric("ADX (14)", f"{adx_v:.1f}", adx_signal, delta_color=adx_color)
+
+        # VWAP
+        vwap_v = ind.vwap
+        if vwap_v > 0:
+            diff_pct = (q.price - vwap_v) / vwap_v * 100
+            vwap_signal = f"{diff_pct:+.1f}% {'above' if diff_pct >= 0 else 'below'}"
+            vwap_color = "normal" if diff_pct >= 0 else "inverse"
+            c3.metric("VWAP", f"${vwap_v:.2f}", vwap_signal, delta_color=vwap_color)
+        else:
+            c3.metric("VWAP", "N/A")
+
+        # TTM Squeeze
+        sq_label = "ON 🔴 — compression" if ind.squeeze_on else "OFF 🟢 — expansion"
+        sq_color = "inverse" if ind.squeeze_on else "normal"
+        c4.metric("TTM Squeeze", sq_label, delta_color=sq_color)
+
+        # SMA context row
+        st.caption(
+            f"SMA20 ${ind.sma_20:.2f} {'✅ price above' if q.price > ind.sma_20 else '⚠️ price below'}  ·  "
+            f"SMA50 ${ind.sma_50:.2f} {'✅ price above' if q.price > ind.sma_50 else '⚠️ price below'}"
+        )
+
+        # Contextual warnings
+        if ind.squeeze_on:
+            st.warning(
+                "TTM Squeeze ON — Bollinger Bands are inside Keltner Channels. "
+                "Volatility compression in progress; premium may expand after breakout. "
+                "Consider waiting for squeeze release before selling.",
+                icon="🔴",
+            )
+        if adx_v < 20:
+            st.info(
+                f"ADX {adx_v:.1f} indicates a ranging/low-trend market — "
+                "ideal conditions for premium selling strategies.",
+                icon="✅",
+            )
+        elif adx_v > 40:
+            st.warning(
+                f"ADX {adx_v:.1f} — strong trend in progress. "
+                "Be cautious selling against the trend.",
+                icon="⚠️",
+            )
 
 
 # ---------------------------------------------------------------------------

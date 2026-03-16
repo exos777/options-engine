@@ -301,86 +301,28 @@ def render_price_forecast(
     ]
 
     # ── Render ───────────────────────────────────────
-    border_color = "#3fb950" if bullish_prob > 55 else \
-                   "#f85149" if bullish_prob < 45 else "#d29922"
-
     neutral_count = total_signals - bullish_signals - bearish_signals
 
-    st.markdown(f"""
-    <div style="
-        background:#161b22;
-        border:1px solid #30363d;
-        border-left:4px solid {border_color};
-        border-radius:8px;
-        padding:16px 20px;
-        margin:8px 0;
-    ">
-        <div style="font-size:15px;font-weight:700;
-                    color:#e6edf3;margin-bottom:4px;">
-            📊 Price Forecast — Next {dte} Days
-            ({result.expiration})
-        </div>
-        <div style="color:{conf_color};font-size:12px;
-                    margin-bottom:12px;">
-            {confidence} &nbsp;|&nbsp;
-            {bullish_signals} bullish /
-            {bearish_signals} bearish /
-            {neutral_count} neutral signals
-        </div>
+    st.subheader(f"📊 Price Forecast — Next {dte} Days ({result.expiration})")
+    st.caption(f"{confidence}  |  {bullish_signals} bullish / {bearish_signals} bearish / {neutral_count} neutral signals")
 
-        <div style="margin-bottom:12px;">
-            <span style="color:#8b949e;font-size:12px;">
-                1σ Expected Range (68% probability):
-            </span><br>
-            <span style="color:#58a6ff;font-size:18px;
-                         font-weight:700;">
-                ${lower:.2f}
-            </span>
-            <span style="color:#8b949e;"> ←————————————→ </span>
-            <span style="color:#58a6ff;font-size:18px;
-                         font-weight:700;">
-                ${upper:.2f}
-            </span>
-        </div>
+    # Probability metrics + expected range
+    fc1, fc2, fc3, fc4 = st.columns(4)
+    fc1.metric("Bullish Probability", f"{bullish_prob:.0f}%")
+    fc2.metric("Bearish Probability", f"{bearish_prob:.0f}%")
+    fc3.metric("1σ Lower Bound", f"${lower:.2f}", help="68% probability price stays above this")
+    fc4.metric("1σ Upper Bound", f"${upper:.2f}", help="68% probability price stays below this")
 
-        <div style="margin-bottom:12px;font-family:monospace;">
-            <div style="color:#f85149;">
-                🔴 Bearish &nbsp;{bear_bar}&nbsp;
-                <strong>{bearish_prob:.0f}%</strong>
-            </div>
-            <div style="color:#3fb950;">
-                🟢 Bullish &nbsp;{bull_bar}&nbsp;
-                <strong>{bullish_prob:.0f}%</strong>
-            </div>
-        </div>
+    # Probability bars using st.progress
+    st.caption("🟢 Bullish probability")
+    st.progress(int(bullish_prob) / 100)
+    st.caption("🔴 Bearish probability")
+    st.progress(int(bearish_prob) / 100)
 
-        <div style="display:grid;
-                    grid-template-columns:1fr 1fr;
-                    gap:12px;margin-bottom:8px;">
-            <div>
-                <div style="color:#3fb950;font-size:12px;
-                            font-weight:700;">
-                    📍 CSP Safe Zone
-                </div>
-                <div style="color:#e6edf3;font-size:13px;">
-                    Below ${lower:.2f}
-                </div>
-                <div style="color:#8b949e;font-size:11px;">
-                    {assign_info}
-                </div>
-            </div>
-            <div>
-                <div style="color:#58a6ff;font-size:12px;
-                            font-weight:700;">
-                    📍 CC Safe Zone
-                </div>
-                <div style="color:#e6edf3;font-size:13px;">
-                    Above ${upper:.2f}
-                </div>
-            </div>
-        </div>
-    </div>
-    """, unsafe_allow_html=True)
+    # Safe zones
+    sz1, sz2 = st.columns(2)
+    sz1.info(f"**📍 CSP Safe Zone** — Below ${lower:.2f}" + (f"\n\n{assign_info}" if assign_info else ""))
+    sz2.info(f"**📍 CC Safe Zone** — Above ${upper:.2f}")
 
     # Expandable indicator breakdown
     with st.expander("🔍 Indicator Breakdown", expanded=False):

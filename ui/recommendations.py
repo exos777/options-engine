@@ -83,10 +83,6 @@ def render_market_overview(result: ScreenerResult, strategy: Strategy) -> None:
         delta_color=regime_delta_color,
     )
 
-    # Warnings
-    for w in result.warnings:
-        st.warning(w, icon="⚠️")
-
     # Earnings warning (shown as error for high visibility)
     if q.earnings_date:
         from data.provider import earnings_warning

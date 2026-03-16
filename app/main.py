@@ -441,8 +441,8 @@ st.divider()
 st.subheader(f"Market Overview — {result.quote.ticker}")
 rec_ui.render_market_overview(result, strategy)
 
-# A2. Signal Dashboard (collapsed)
-rec_ui.render_signal_dashboard(result)
+# A2. Price Forecast (probability-based)
+rec_ui.render_price_forecast(result, strategy, full_ind)
 
 # B. Technical Chart
 st.divider()

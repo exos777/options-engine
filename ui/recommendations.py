@@ -7,8 +7,10 @@ They are separated from app/main.py to keep the main file focused on layout.
 
 from __future__ import annotations
 
+import pandas as pd
 import streamlit as st
 
+from indicators.technical import FullIndicators
 from strategies.models import (
     ChartRegime,
     Recommendation,
@@ -94,78 +96,309 @@ def render_market_overview(result: ScreenerResult, strategy: Strategy) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Signal Dashboard (collapsed expander)
+# Price Forecast (probability-based, replaces old signal dashboard)
 # ---------------------------------------------------------------------------
 
-def render_signal_dashboard(result: ScreenerResult) -> None:
-    """Render collapsed Signal Dashboard expander with ADX, VWAP, TTM Squeeze."""
-    ind = result.indicators
-    q = result.quote
+def render_price_forecast(
+    result: ScreenerResult,
+    strategy: Strategy,
+    full_ind: FullIndicators | None,
+) -> None:
+    """
+    Render a comprehensive probability-based price forecast using all 9
+    indicator signals.  Replaces the old warning banner with an actionable
+    bullish/bearish probability, confidence level, and indicator breakdown.
+    """
+    price = result.quote.price
+    dte = result.dte
+    expected_move = result.expected_move
+    upper = price + expected_move
+    lower = price - expected_move
+    indicators = result.indicators
 
-    with st.expander("📊 Signal Dashboard", expanded=False):
-        c1, c2, c3, c4 = st.columns(4)
+    # ── Gather all indicator values ──────────────────
+    rsi = indicators.rsi_14
+    sma20 = indicators.sma_20
+    sma50 = indicators.sma_50
+    adx = getattr(indicators, "adx_14", 0) or 0
+    vwap = getattr(indicators, "vwap", 0) or 0
+    squeeze_on = getattr(indicators, "squeeze_on", False)
 
-        # RSI
-        rsi_v = ind.rsi_14
-        if rsi_v >= 70:
-            rsi_signal, rsi_color = "Overbought ⚠️", "inverse"
-        elif rsi_v <= 30:
-            rsi_signal, rsi_color = "Oversold 🔵", "normal"
-        else:
-            rsi_signal, rsi_color = "Neutral", "off"
-        c1.metric("RSI (14)", f"{rsi_v:.1f}", rsi_signal, delta_color=rsi_color)
+    # MACD values from full_ind
+    macd_line = 0.0
+    hist_rising = False
+    last_hist = 0.0
+    if full_ind is not None and hasattr(full_ind, "macd_data"):
+        macd_line = float(full_ind.macd_data.macd_line.iloc[-1])
+        last_hist = float(full_ind.macd_data.histogram.iloc[-1])
+        prev_hist = float(full_ind.macd_data.histogram.iloc[-2])
+        hist_rising = last_hist > prev_hist
 
-        # ADX
-        adx_v = ind.adx_14
-        if adx_v > 25:
-            adx_signal, adx_color = "Trending 📈", "off"
-        elif adx_v < 20:
-            adx_signal, adx_color = "Ranging ✅", "normal"
-        else:
-            adx_signal, adx_color = "Transitioning", "off"
-        c2.metric("ADX (14)", f"{adx_v:.1f}", adx_signal, delta_color=adx_color)
+    # BB pct_b
+    pct_b = 0.5  # neutral default
+    if full_ind is not None and hasattr(full_ind, "bb"):
+        pb = full_ind.bb.pct_b.iloc[-1]
+        if not pd.isna(pb):
+            pct_b = float(pb)
 
-        # VWAP
-        vwap_v = ind.vwap
-        if vwap_v > 0:
-            diff_pct = (q.price - vwap_v) / vwap_v * 100
-            vwap_signal = f"{diff_pct:+.1f}% {'above' if diff_pct >= 0 else 'below'}"
-            vwap_color = "normal" if diff_pct >= 0 else "inverse"
-            c3.metric("VWAP", f"${vwap_v:.2f}", vwap_signal, delta_color=vwap_color)
-        else:
-            c3.metric("VWAP", "N/A")
+    regime = result.regime.primary
 
-        # TTM Squeeze
-        sq_label = "ON 🔴 — compression" if ind.squeeze_on else "OFF 🟢 — expansion"
-        sq_color = "inverse" if ind.squeeze_on else "normal"
-        c4.metric("TTM Squeeze", sq_label, delta_color=sq_color)
+    # ── Calculate adjustments ────────────────────────
+    adjustments: dict[str, int] = {}
 
-        # SMA context row
-        st.caption(
-            f"SMA20 ${ind.sma_20:.2f} {'✅ price above' if q.price > ind.sma_20 else '⚠️ price below'}  ·  "
-            f"SMA50 ${ind.sma_50:.2f} {'✅ price above' if q.price > ind.sma_50 else '⚠️ price below'}"
+    # 1. RSI
+    if rsi < 30:        adjustments["RSI"] = +15
+    elif rsi < 35:      adjustments["RSI"] = +10
+    elif rsi < 40:      adjustments["RSI"] = +5
+    elif rsi <= 60:     adjustments["RSI"] = 0
+    elif rsi < 65:      adjustments["RSI"] = -5
+    elif rsi < 70:      adjustments["RSI"] = -10
+    else:               adjustments["RSI"] = -15
+
+    # 2. MACD
+    if macd_line > 0 and hist_rising:       adjustments["MACD"] = +12
+    elif macd_line > 0 and not hist_rising:  adjustments["MACD"] = +6
+    elif macd_line < 0 and hist_rising:     adjustments["MACD"] = -3
+    else:                                   adjustments["MACD"] = -12
+
+    # 3. SMA20
+    pct_from_sma20 = (price - sma20) / sma20 * 100
+    if pct_from_sma20 > 3:      adjustments["SMA20"] = +10
+    elif pct_from_sma20 > 1:    adjustments["SMA20"] = +6
+    elif pct_from_sma20 > 0:    adjustments["SMA20"] = +3
+    elif pct_from_sma20 > -1:   adjustments["SMA20"] = -3
+    elif pct_from_sma20 > -3:   adjustments["SMA20"] = -6
+    else:                       adjustments["SMA20"] = -10
+
+    # 4. SMA50
+    pct_from_sma50 = (price - sma50) / sma50 * 100
+    if pct_from_sma50 > 3:      adjustments["SMA50"] = +10
+    elif pct_from_sma50 > 1:    adjustments["SMA50"] = +6
+    elif pct_from_sma50 > 0:    adjustments["SMA50"] = +3
+    elif pct_from_sma50 > -1:   adjustments["SMA50"] = -3
+    elif pct_from_sma50 > -3:   adjustments["SMA50"] = -6
+    else:                       adjustments["SMA50"] = -10
+
+    # 5. Bollinger Bands
+    if pct_b < 0:           adjustments["BB"] = +10
+    elif pct_b < 0.2:       adjustments["BB"] = +7
+    elif pct_b < 0.4:       adjustments["BB"] = +3
+    elif pct_b <= 0.6:      adjustments["BB"] = 0
+    elif pct_b < 0.8:       adjustments["BB"] = -3
+    elif pct_b <= 1.0:      adjustments["BB"] = -7
+    else:                   adjustments["BB"] = -10
+
+    # 6. ADX (trend strength × direction from regime)
+    if adx < 20:
+        adjustments["ADX"] = 0
+    elif regime == ChartRegime.BEARISH:
+        adjustments["ADX"] = -8 if adx > 30 else -4
+    elif regime == ChartRegime.BULLISH:
+        adjustments["ADX"] = +8 if adx > 30 else +4
+    else:
+        adjustments["ADX"] = 0
+
+    # 7. VWAP
+    if vwap > 0:
+        pct_from_vwap = (price - vwap) / vwap * 100
+        if pct_from_vwap > 2:       adjustments["VWAP"] = +8
+        elif pct_from_vwap > 0:     adjustments["VWAP"] = +4
+        elif pct_from_vwap > -2:    adjustments["VWAP"] = -4
+        else:                       adjustments["VWAP"] = -8
+    else:
+        adjustments["VWAP"] = 0
+
+    # 8. TTM Squeeze
+    if squeeze_on:
+        if regime == ChartRegime.BULLISH:     adjustments["Squeeze"] = +3
+        elif regime == ChartRegime.BEARISH:   adjustments["Squeeze"] = -3
+        else:                                 adjustments["Squeeze"] = 0
+    else:
+        if last_hist > 0 and hist_rising:         adjustments["Squeeze"] = +7
+        elif last_hist > 0:                       adjustments["Squeeze"] = +3
+        elif last_hist < 0 and not hist_rising:   adjustments["Squeeze"] = -7
+        else:                                     adjustments["Squeeze"] = -3
+
+    # 9. Chart Regime
+    regime_adj = {
+        ChartRegime.BULLISH:         +10,
+        ChartRegime.NEAR_SUPPORT:    +6,
+        ChartRegime.NEUTRAL:          0,
+        ChartRegime.NEAR_RESISTANCE: -6,
+        ChartRegime.BEARISH:         -10,
+        ChartRegime.OVEREXTENDED:    -8,
+    }
+    adjustments["Regime"] = regime_adj.get(regime, 0)
+
+    # ── Final probability ────────────────────────────
+    total_adj = sum(adjustments.values())
+    bullish_prob = max(15.0, min(85.0, 50.0 + total_adj))
+    bearish_prob = 100.0 - bullish_prob
+
+    # ── Confidence level ─────────────────────────────
+    bullish_signals = sum(1 for v in adjustments.values() if v > 0)
+    bearish_signals = sum(1 for v in adjustments.values() if v < 0)
+    total_signals = len(adjustments)
+    majority = max(bullish_signals, bearish_signals)
+    agreement = majority / total_signals if total_signals > 0 else 0
+
+    if agreement >= 0.77:
+        confidence = "🟢 High Confidence"
+        conf_color = "#3fb950"
+    elif agreement >= 0.55:
+        confidence = "🟡 Moderate Confidence"
+        conf_color = "#d29922"
+    else:
+        confidence = "🔴 Low Confidence — Mixed Signals"
+        conf_color = "#f85149"
+
+    # ── Progress bars ────────────────────────────────
+    bull_filled = int(bullish_prob / 5)
+    bear_filled = int(bearish_prob / 5)
+    bull_bar = "\u2588" * bull_filled + "\u2591" * (20 - bull_filled)
+    bear_bar = "\u2588" * bear_filled + "\u2591" * (20 - bear_filled)
+
+    # ── Assignment probability from best rec ─────────
+    best_rec = result.recommendations[0] if result.recommendations else None
+    assign_info = ""
+    if best_rec and best_rec.option.contract.delta:
+        assign_pct = abs(best_rec.option.contract.delta) * 100
+        strike = best_rec.option.contract.strike
+        assign_info = (
+            f"Best strike ${strike:.2f}: "
+            f"~{assign_pct:.0f}% assignment probability"
         )
 
-        # Contextual warnings
-        if ind.squeeze_on:
-            st.warning(
-                "TTM Squeeze ON — Bollinger Bands are inside Keltner Channels. "
-                "Volatility compression in progress; premium may expand after breakout. "
-                "Consider waiting for squeeze release before selling.",
-                icon="🔴",
-            )
-        if adx_v < 20:
-            st.info(
-                f"ADX {adx_v:.1f} indicates a ranging/low-trend market — "
-                "ideal conditions for premium selling strategies.",
-                icon="✅",
-            )
-        elif adx_v > 40:
-            st.warning(
-                f"ADX {adx_v:.1f} — strong trend in progress. "
-                "Be cautious selling against the trend.",
-                icon="⚠️",
-            )
+    # ── Indicator breakdown rows ──────────────────────
+    indicator_rows = [
+        ("RSI(14)", f"{rsi:.1f}",
+         "🟢" if adjustments["RSI"] > 0 else "🔴" if adjustments["RSI"] < 0 else "⚪",
+         f"{adjustments['RSI']:+d}"),
+        ("MACD", f"{macd_line:.2f}",
+         "🟢" if adjustments["MACD"] > 0 else "🔴" if adjustments["MACD"] < 0 else "⚪",
+         f"{adjustments['MACD']:+d}"),
+        ("SMA20", f"${sma20:.2f}",
+         "🟢" if adjustments["SMA20"] > 0 else "🔴" if adjustments["SMA20"] < 0 else "⚪",
+         f"{adjustments['SMA20']:+d}"),
+        ("SMA50", f"${sma50:.2f}",
+         "🟢" if adjustments["SMA50"] > 0 else "🔴" if adjustments["SMA50"] < 0 else "⚪",
+         f"{adjustments['SMA50']:+d}"),
+        ("Bollinger", f"{pct_b:.2f} %B",
+         "🟢" if adjustments["BB"] > 0 else "🔴" if adjustments["BB"] < 0 else "⚪",
+         f"{adjustments['BB']:+d}"),
+        ("ADX(14)", f"{adx:.1f}",
+         "🟢" if adjustments["ADX"] > 0 else "🔴" if adjustments["ADX"] < 0 else "⚪",
+         f"{adjustments['ADX']:+d}"),
+        ("VWAP", f"${vwap:.2f}" if vwap > 0 else "N/A",
+         "🟢" if adjustments["VWAP"] > 0 else "🔴" if adjustments["VWAP"] < 0 else "⚪",
+         f"{adjustments['VWAP']:+d}"),
+        ("TTM Squeeze", "ON \U0001f534" if squeeze_on else "OFF \U0001f7e2",
+         "🟢" if adjustments["Squeeze"] > 0 else "🔴" if adjustments["Squeeze"] < 0 else "⚪",
+         f"{adjustments['Squeeze']:+d}"),
+        ("Regime", regime.value,
+         "🟢" if adjustments["Regime"] > 0 else "🔴" if adjustments["Regime"] < 0 else "⚪",
+         f"{adjustments['Regime']:+d}"),
+    ]
+
+    # ── Render ───────────────────────────────────────
+    border_color = "#3fb950" if bullish_prob > 55 else \
+                   "#f85149" if bullish_prob < 45 else "#d29922"
+
+    neutral_count = total_signals - bullish_signals - bearish_signals
+
+    st.markdown(f"""
+    <div style="
+        background:#161b22;
+        border:1px solid #30363d;
+        border-left:4px solid {border_color};
+        border-radius:8px;
+        padding:16px 20px;
+        margin:8px 0;
+    ">
+        <div style="font-size:15px;font-weight:700;
+                    color:#e6edf3;margin-bottom:4px;">
+            📊 Price Forecast — Next {dte} Days
+            ({result.expiration})
+        </div>
+        <div style="color:{conf_color};font-size:12px;
+                    margin-bottom:12px;">
+            {confidence} &nbsp;|&nbsp;
+            {bullish_signals} bullish /
+            {bearish_signals} bearish /
+            {neutral_count} neutral signals
+        </div>
+
+        <div style="margin-bottom:12px;">
+            <span style="color:#8b949e;font-size:12px;">
+                1σ Expected Range (68% probability):
+            </span><br>
+            <span style="color:#58a6ff;font-size:18px;
+                         font-weight:700;">
+                ${lower:.2f}
+            </span>
+            <span style="color:#8b949e;"> ←————————————→ </span>
+            <span style="color:#58a6ff;font-size:18px;
+                         font-weight:700;">
+                ${upper:.2f}
+            </span>
+        </div>
+
+        <div style="margin-bottom:12px;font-family:monospace;">
+            <div style="color:#f85149;">
+                🔴 Bearish &nbsp;{bear_bar}&nbsp;
+                <strong>{bearish_prob:.0f}%</strong>
+            </div>
+            <div style="color:#3fb950;">
+                🟢 Bullish &nbsp;{bull_bar}&nbsp;
+                <strong>{bullish_prob:.0f}%</strong>
+            </div>
+        </div>
+
+        <div style="display:grid;
+                    grid-template-columns:1fr 1fr;
+                    gap:12px;margin-bottom:8px;">
+            <div>
+                <div style="color:#3fb950;font-size:12px;
+                            font-weight:700;">
+                    📍 CSP Safe Zone
+                </div>
+                <div style="color:#e6edf3;font-size:13px;">
+                    Below ${lower:.2f}
+                </div>
+                <div style="color:#8b949e;font-size:11px;">
+                    {assign_info}
+                </div>
+            </div>
+            <div>
+                <div style="color:#58a6ff;font-size:12px;
+                            font-weight:700;">
+                    📍 CC Safe Zone
+                </div>
+                <div style="color:#e6edf3;font-size:13px;">
+                    Above ${upper:.2f}
+                </div>
+            </div>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # Expandable indicator breakdown
+    with st.expander("🔍 Indicator Breakdown", expanded=False):
+        df = pd.DataFrame(
+            indicator_rows,
+            columns=["Indicator", "Value", "Signal", "Contribution"],
+        )
+        st.dataframe(df, hide_index=True, use_container_width=True)
+        st.caption(
+            f"Total adjustment: {total_adj:+.0f} points → "
+            f"Bullish {bullish_prob:.0f}% / "
+            f"Bearish {bearish_prob:.0f}%"
+        )
+
+    st.caption(
+        "Probability estimates use technical indicators only. "
+        "Not financial advice. Options involve substantial risk."
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -40,6 +40,18 @@ _RSI_OVERBOUGHT = 70
 _RSI_OVERSOLD   = 30
 
 
+_ADX_TRENDING = 25
+_ADX_RANGING  = 20
+
+
+def _adx_context(adx: float) -> str:
+    if adx > _ADX_TRENDING:
+        return f"ADX {adx:.1f} (trending)"
+    if adx < _ADX_RANGING:
+        return f"ADX {adx:.1f} (ranging — good for premium selling)"
+    return f"ADX {adx:.1f} (transitioning)"
+
+
 def _describe(
     primary: ChartRegime,
     secondary: Optional[ChartRegime],
@@ -53,7 +65,8 @@ def _describe(
         f"SMA20 ${ind.sma_20:.2f}  "
         f"SMA50 ${ind.sma_50:.2f}  "
         f"RSI {ind.rsi_14:.1f}  "
-        f"ATR ${ind.atr_14:.2f}"
+        f"ATR ${ind.atr_14:.2f}  "
+        f"{_adx_context(ind.adx_14)}"
     )
     return "  ".join(parts)
 
@@ -73,10 +86,11 @@ def classify_regime(
     Returns a RegimeResult with primary classification, optional secondary,
     a human-readable description, and a trade_bias flag.
     """
-    price = indicators.current_price
-    sma20 = indicators.sma_20
-    sma50 = indicators.sma_50
-    rsi = indicators.rsi_14
+    price  = indicators.current_price
+    sma20  = indicators.sma_20
+    sma50  = indicators.sma_50
+    rsi    = indicators.rsi_14
+    adx_v  = indicators.adx_14
 
     nr = nearest_resistance(resistance_levels, price)
     ns = nearest_support(support_levels, price)
@@ -119,6 +133,7 @@ def classify_regime(
             "The chart is in a confirmed downtrend (price below SMA20 and SMA50). "
             "Covered calls carry assignment risk on a falling stock; "
             "cash-secured puts face a falling knife. Consider waiting for stabilisation."
+            + (f" ADX {adx_v:.1f} confirms the strong downtrend." if adx_v > _ADX_TRENDING else "")
         )
     elif primary == ChartRegime.OVEREXTENDED:
         trade_bias = "caution"
@@ -126,7 +141,10 @@ def classify_regime(
         trade_bias = "caution"
     elif primary in (ChartRegime.BULLISH, ChartRegime.NEAR_SUPPORT):
         trade_bias = "go"
-    else:  # NEUTRAL
+    elif primary == ChartRegime.NEUTRAL and adx_v < _ADX_RANGING:
+        # Ranging market is ideal for premium selling — upgrade from caution
+        trade_bias = "go"
+    else:  # NEUTRAL with transitioning/trending ADX
         trade_bias = "caution"
 
     return RegimeResult(

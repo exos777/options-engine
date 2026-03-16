@@ -104,6 +104,9 @@ class TechnicalIndicators:
     avg_volume_20: float
     current_price: float
     weekly_atr_est: float   # ATR projected to weekly (ATR * sqrt(5))
+    adx_14: float = 25.0    # Average Directional Index; >25 trending, <20 ranging
+    squeeze_on: bool = False # TTM Squeeze: True = BB inside KC (don't sell yet)
+    vwap: float = 0.0       # Volume-weighted average price (cumulative)
 
 
 @dataclass

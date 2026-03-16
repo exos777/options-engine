@@ -68,6 +68,91 @@ def average_volume(volume: pd.Series, period: int = 20) -> pd.Series:
     return volume.rolling(window=period, min_periods=1).mean()
 
 
+def adx(
+    high: pd.Series,
+    low: pd.Series,
+    close: pd.Series,
+    period: int = 14,
+) -> pd.Series:
+    """
+    Average Directional Index (Wilder's smoothing).
+    Returns values 0–100: >25 = trending, <20 = ranging.
+    """
+    prev_close = close.shift(1)
+    tr = pd.concat(
+        [high - low, (high - prev_close).abs(), (low - prev_close).abs()],
+        axis=1,
+    ).max(axis=1)
+
+    up_move   = high.diff()
+    down_move = -low.diff()
+
+    plus_dm  = pd.Series(
+        np.where((up_move > down_move) & (up_move > 0), up_move, 0.0),
+        index=high.index,
+    )
+    minus_dm = pd.Series(
+        np.where((down_move > up_move) & (down_move > 0), down_move, 0.0),
+        index=high.index,
+    )
+
+    smooth_tr   = tr.ewm(com=period - 1, min_periods=period).mean()
+    smooth_plus = plus_dm.ewm(com=period - 1, min_periods=period).mean()
+    smooth_minus = minus_dm.ewm(com=period - 1, min_periods=period).mean()
+
+    plus_di  = 100 * smooth_plus  / smooth_tr.replace(0, np.nan)
+    minus_di = 100 * smooth_minus / smooth_tr.replace(0, np.nan)
+
+    di_sum  = (plus_di + minus_di).replace(0, np.nan)
+    dx      = 100 * (plus_di - minus_di).abs() / di_sum
+    return dx.ewm(com=period - 1, min_periods=period).mean()
+
+
+def vwap(
+    high: pd.Series,
+    low: pd.Series,
+    close: pd.Series,
+    volume: pd.Series,
+) -> pd.Series:
+    """
+    Cumulative VWAP anchored to the start of the data window.
+    Uses typical price = (H + L + C) / 3.
+    """
+    typical = (high + low + close) / 3
+    cum_vol = volume.cumsum().replace(0, np.nan)
+    return (typical * volume).cumsum() / cum_vol
+
+
+def ttm_squeeze(
+    high: pd.Series,
+    low: pd.Series,
+    close: pd.Series,
+    bb_period: int = 20,
+    bb_mult: float = 2.0,
+    kc_period: int = 20,
+    kc_mult: float = 1.5,
+) -> pd.Series:
+    """
+    TTM Squeeze: True when Bollinger Bands are inside Keltner Channels.
+    Squeeze ON  (True)  = low-volatility compression — avoid selling yet.
+    Squeeze OFF (False) = expansion starting — better time to sell premium.
+    """
+    # Bollinger Bands
+    bb_mid   = sma(close, bb_period)
+    bb_std   = close.rolling(bb_period, min_periods=bb_period).std()
+    bb_upper = bb_mid + bb_mult * bb_std
+    bb_lower = bb_mid - bb_mult * bb_std
+
+    # Keltner Channels (ATR-based)
+    kc_mid   = sma(close, kc_period)
+    kc_atr   = atr(high, low, close, kc_period)
+    kc_upper = kc_mid + kc_mult * kc_atr
+    kc_lower = kc_mid - kc_mult * kc_atr
+
+    # Squeeze = BB entirely inside KC
+    return (bb_upper < kc_upper) & (bb_lower > kc_lower)
+
+
 @dataclass
 class BollingerBands:
     middle: pd.Series
@@ -130,6 +215,9 @@ class FullIndicators:
     macd_data: MACDData
     volume: pd.Series
     avg_volume: pd.Series
+    adx14: pd.Series
+    vwap_series: pd.Series
+    squeeze: pd.Series      # bool Series: True = squeeze on
 
 
 # ---------------------------------------------------------------------------
@@ -162,13 +250,16 @@ def _calculate_full(df: pd.DataFrame) -> FullIndicators:
     close  = df["Close"]
     volume = df["Volume"]
 
-    sma20_s  = sma(close, 20)
-    sma50_s  = sma(close, 50)
-    rsi14_s  = rsi(close, 14)
-    atr14_s  = atr(high, low, close, 14)
-    avgvol_s = average_volume(volume, 20)
-    bb_data  = bollinger_bands(close, period=20, n_std=2.0)
-    macd_d   = macd(close, fast=12, slow=26, signal=9)
+    sma20_s   = sma(close, 20)
+    sma50_s   = sma(close, 50)
+    rsi14_s   = rsi(close, 14)
+    atr14_s   = atr(high, low, close, 14)
+    avgvol_s  = average_volume(volume, 20)
+    bb_data   = bollinger_bands(close, period=20, n_std=2.0)
+    macd_d    = macd(close, fast=12, slow=26, signal=9)
+    adx14_s   = adx(high, low, close, period=14)
+    vwap_s    = vwap(high, low, close, volume)
+    squeeze_s = ttm_squeeze(high, low, close)
 
     current_price = float(close.iloc[-1])
 
@@ -184,6 +275,9 @@ def _calculate_full(df: pd.DataFrame) -> FullIndicators:
         avg_volume_20=_last(avgvol_s, 0.0),
         current_price=current_price,
         weekly_atr_est=_last(atr14_s, 0.0) * math.sqrt(5),
+        adx_14=_last(adx14_s, 25.0),
+        squeeze_on=bool(squeeze_s.iloc[-1]) if not pd.isna(squeeze_s.iloc[-1]) else False,
+        vwap=_last(vwap_s, current_price),
     )
 
     return FullIndicators(
@@ -201,4 +295,7 @@ def _calculate_full(df: pd.DataFrame) -> FullIndicators:
         macd_data=macd_d,
         volume=volume,
         avg_volume=avgvol_s,
+        adx14=adx14_s,
+        vwap_series=vwap_s,
+        squeeze=squeeze_s,
     )

@@ -55,6 +55,11 @@ _COL_EM_FILL = "rgba(255,165,0,0.08)"   # light orange shaded zone
 _COL_EM_LINE = "rgba(255,165,0,0.70)"   # orange dashed boundary lines
 
 
+_COL_VWAP       = "#a855f7"   # purple
+_COL_SQ_ON      = "#ef5350"   # red — squeeze on (don't sell yet)
+_COL_SQ_OFF     = "#26a69a"   # green — squeeze off (good to sell)
+
+
 def build_price_chart(
     full_ind: FullIndicators,
     support_levels: list[SupportResistanceLevel],
@@ -150,6 +155,11 @@ def build_price_chart(
     fig.add_trace(
         go.Scatter(x=df_index, y=full_ind.sma50, mode="lines",
                    name="SMA 50", line=dict(color=_COL_SMA50, width=1.5)),
+        row=1, col=1,
+    )
+    fig.add_trace(
+        go.Scatter(x=df_index, y=full_ind.vwap_series, mode="lines",
+                   name="VWAP", line=dict(color=_COL_VWAP, width=1.5, dash="dot")),
         row=1, col=1,
     )
 
@@ -274,6 +284,25 @@ def build_price_chart(
     # Zero line on MACD panel
     fig.add_shape(type="line", x0=x0, x1=x1, y0=0, y1=0,
                   line=dict(color="rgba(255,255,255,0.3)", width=1), row=3, col=1)
+
+    # TTM Squeeze dots on MACD zero line
+    # Red = squeeze on (low vol compression, don't sell yet)
+    # Green = squeeze off (expansion, good time to sell)
+    sq = full_ind.squeeze.fillna(False)
+    sq_colors = [_COL_SQ_ON if v else _COL_SQ_OFF for v in sq]
+    fig.add_trace(
+        go.Scatter(
+            x=df_index,
+            y=[0] * len(df_index),
+            mode="markers",
+            marker=dict(color=sq_colors, size=5, symbol="circle"),
+            name="TTM Squeeze",
+            showlegend=True,
+            hovertemplate="Squeeze: %{customdata}<extra></extra>",
+            customdata=["ON" if v else "OFF" for v in sq],
+        ),
+        row=3, col=1,
+    )
 
     # ------------------------------------------------------------------ #
     # Layout

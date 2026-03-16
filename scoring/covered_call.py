@@ -312,7 +312,7 @@ def score_covered_calls(
     resistance_levels: list[SupportResistanceLevel],
     params: FilterParams,
     earnings_date: Optional[str] = None,
-    expected_move: Optional[float] = None,
+    expected_move: float = 0.0,
 ) -> list[ScoredOption]:
     """
     Score each call option contract and return a list of ScoredOption,
@@ -360,7 +360,7 @@ def score_covered_calls(
         break_even = current_price - premium  # break-even on downside
 
         # --- Expected move ---
-        em = expected_move if expected_move is not None else (
+        em = expected_move if expected_move > 0 else (
             current_price * c.implied_volatility * math.sqrt(max(dte, 1) / 365)
             if c.implied_volatility
             else indicators.atr_14 * math.sqrt(max(dte, 1))

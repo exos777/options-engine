@@ -332,7 +332,7 @@ def score_cash_secured_puts(
     iv_52w_high: Optional[float] = None,
     iv_52w_low: Optional[float] = None,
     earnings_date: Optional[str] = None,
-    expected_move: Optional[float] = None,
+    expected_move: float = 0.0,
 ) -> list[ScoredOption]:
     """
     Score each put option and return a filtered, sorted list of ScoredOption.
@@ -375,7 +375,7 @@ def score_cash_secured_puts(
         break_even = c.strike - premium  # net cost basis if assigned
 
         # --- Expected move ---
-        em = expected_move if expected_move is not None else (
+        em = expected_move if expected_move > 0 else (
             current_price * c.implied_volatility * math.sqrt(max(dte, 1) / 365)
             if c.implied_volatility
             else indicators.atr_14 * math.sqrt(max(dte, 1))

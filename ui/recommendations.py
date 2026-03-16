@@ -230,115 +230,186 @@ def render_price_forecast(
     }
     adjustments["Regime"] = regime_adj.get(regime, 0)
 
-    # ── Final probability ────────────────────────────
+    # ── Votes (simple +1 / -1 / 0 per indicator) ────
+    votes = {k: (1 if v > 0 else -1 if v < 0 else 0) for k, v in adjustments.items()}
+    bullish_signals = sum(1 for v in votes.values() if v > 0)
+    bearish_signals = sum(1 for v in votes.values() if v < 0)
+    neutral_count   = sum(1 for v in votes.values() if v == 0)
+
+    # ── Final probability (weighted) ─────────────────
     total_adj = sum(adjustments.values())
     bullish_prob = max(15.0, min(85.0, 50.0 + total_adj))
     bearish_prob = 100.0 - bullish_prob
 
-    # ── Confidence level ─────────────────────────────
-    bullish_signals = sum(1 for v in adjustments.values() if v > 0)
-    bearish_signals = sum(1 for v in adjustments.values() if v < 0)
-    total_signals = len(adjustments)
-    majority = max(bullish_signals, bearish_signals)
-    agreement = majority / total_signals if total_signals > 0 else 0
+    direction = (
+        "BULLISH" if bullish_prob > 52
+        else "BEARISH" if bullish_prob < 48
+        else "NEUTRAL"
+    )
+    direction_emoji = "🟢" if direction == "BULLISH" else "🔴" if direction == "BEARISH" else "🟡"
+    majority_count = max(bullish_signals, bearish_signals)
 
-    if agreement >= 0.77:
-        confidence = "🟢 High Confidence"
-        conf_color = "#3fb950"
-    elif agreement >= 0.55:
-        confidence = "🟡 Moderate Confidence"
-        conf_color = "#d29922"
+    # ── Bias color theme ─────────────────────────────
+    if direction == "BULLISH":
+        bias_bg, bias_color, bias_border = "#1a4a2e", "#3fb950", "#3fb950"
+    elif direction == "BEARISH":
+        bias_bg, bias_color, bias_border = "#4a1a1a", "#f85149", "#f85149"
     else:
-        confidence = "🔴 Low Confidence — Mixed Signals"
-        conf_color = "#f85149"
+        bias_bg, bias_color, bias_border = "#3a3a1a", "#d29922", "#d29922"
 
-    # ── Progress bars ────────────────────────────────
-    bull_filled = int(bullish_prob / 5)
-    bear_filled = int(bearish_prob / 5)
-    bull_bar = "\u2588" * bull_filled + "\u2591" * (20 - bull_filled)
-    bear_bar = "\u2588" * bear_filled + "\u2591" * (20 - bear_filled)
+    em_pct = expected_move / price * 100 if price > 0 else 0.0
 
-    # ── Assignment probability from best rec ─────────
-    best_rec = result.recommendations[0] if result.recommendations else None
-    assign_info = ""
-    if best_rec and best_rec.option.contract.delta:
-        assign_pct = abs(best_rec.option.contract.delta) * 100
-        strike = best_rec.option.contract.strike
-        assign_info = (
-            f"Best strike ${strike:.2f}: "
-            f"~{assign_pct:.0f}% assignment probability"
-        )
+    # ── CSP / CC detail lines ─────────────────────────
+    csp_detail = "Outside 1&#963; expected move"
+    cc_detail  = "Outside 1&#963; expected move"
+    if result.recommendations:
+        best = result.recommendations[0]
+        c = best.option.contract
+        opt = best.option
+        delta_str  = f"&#916;{abs(c.delta):.2f}" if c.delta else ""
+        theta_str  = f"&#952;${abs(c.theta):.2f}/day" if c.theta else ""
+        detail_str = f"Best: ${c.strike:.2f} &middot; {delta_str} &middot; ${opt.premium:.2f} premium &middot; {theta_str}".strip(" &middot;")
+        if strategy == Strategy.CASH_SECURED_PUT:
+            csp_detail = detail_str
+        else:
+            cc_detail = detail_str
 
-    # ── Indicator breakdown rows ──────────────────────
+    # ── Indicator breakdown rows (with Reason) ────────
+    def _reason(key: str) -> str:
+        if key == "RSI":
+            if rsi < 35:   return "Approaching oversold"
+            if rsi > 65:   return "Approaching overbought"
+            return "Neutral zone"
+        if key == "MACD":
+            if macd_line > 0 and hist_rising:  return "Positive + rising"
+            if macd_line > 0:                  return "Positive + falling"
+            if macd_line < 0 and hist_rising:  return "Negative + rising"
+            return "Negative + falling"
+        if key == "SMA20":
+            pct = pct_from_sma20
+            return f"Price {abs(pct):.1f}% {'above' if pct >= 0 else 'below'} SMA20"
+        if key == "SMA50":
+            pct = pct_from_sma50
+            return f"Price {abs(pct):.1f}% {'above' if pct >= 0 else 'below'} SMA50"
+        if key == "BB":
+            if pct_b < 0.2:    return "Lower band — oversold zone"
+            if pct_b > 0.8:    return "Upper band — overbought zone"
+            return "Mid-band — neutral"
+        if key == "ADX":
+            if adx < 20:       return "Ranging — no trend bias"
+            return f"{'Bullish' if regime == ChartRegime.BULLISH else 'Bearish'} trend confirmed"
+        if key == "VWAP":
+            if vwap <= 0:      return "No VWAP data"
+            pct = (price - vwap) / vwap * 100
+            return f"Price {abs(pct):.1f}% {'above' if pct >= 0 else 'below'} VWAP"
+        if key == "Squeeze":
+            if squeeze_on:     return "Compression — volatility pending"
+            return "Volatility releasing"
+        if key == "Regime":
+            return regime.value
+        return ""
+
     indicator_rows = [
-        ("RSI(14)", f"{rsi:.1f}",
-         "🟢" if adjustments["RSI"] > 0 else "🔴" if adjustments["RSI"] < 0 else "⚪",
-         f"{adjustments['RSI']:+d}"),
-        ("MACD", f"{macd_line:.2f}",
-         "🟢" if adjustments["MACD"] > 0 else "🔴" if adjustments["MACD"] < 0 else "⚪",
-         f"{adjustments['MACD']:+d}"),
-        ("SMA20", f"${sma20:.2f}",
-         "🟢" if adjustments["SMA20"] > 0 else "🔴" if adjustments["SMA20"] < 0 else "⚪",
-         f"{adjustments['SMA20']:+d}"),
-        ("SMA50", f"${sma50:.2f}",
-         "🟢" if adjustments["SMA50"] > 0 else "🔴" if adjustments["SMA50"] < 0 else "⚪",
-         f"{adjustments['SMA50']:+d}"),
-        ("Bollinger", f"{pct_b:.2f} %B",
-         "🟢" if adjustments["BB"] > 0 else "🔴" if adjustments["BB"] < 0 else "⚪",
-         f"{adjustments['BB']:+d}"),
-        ("ADX(14)", f"{adx:.1f}",
-         "🟢" if adjustments["ADX"] > 0 else "🔴" if adjustments["ADX"] < 0 else "⚪",
-         f"{adjustments['ADX']:+d}"),
-        ("VWAP", f"${vwap:.2f}" if vwap > 0 else "N/A",
-         "🟢" if adjustments["VWAP"] > 0 else "🔴" if adjustments["VWAP"] < 0 else "⚪",
-         f"{adjustments['VWAP']:+d}"),
-        ("TTM Squeeze", "ON \U0001f534" if squeeze_on else "OFF \U0001f7e2",
-         "🟢" if adjustments["Squeeze"] > 0 else "🔴" if adjustments["Squeeze"] < 0 else "⚪",
-         f"{adjustments['Squeeze']:+d}"),
-        ("Regime", regime.value,
-         "🟢" if adjustments["Regime"] > 0 else "🔴" if adjustments["Regime"] < 0 else "⚪",
-         f"{adjustments['Regime']:+d}"),
+        ("RSI(14)",    f"{rsi:.1f}",
+         "🟢" if votes["RSI"] > 0 else "🔴" if votes["RSI"] < 0 else "⚪",
+         _reason("RSI")),
+        ("MACD",       f"{macd_line:.2f}",
+         "🟢" if votes["MACD"] > 0 else "🔴" if votes["MACD"] < 0 else "⚪",
+         _reason("MACD")),
+        ("SMA20",      f"${sma20:.2f}",
+         "🟢" if votes["SMA20"] > 0 else "🔴" if votes["SMA20"] < 0 else "⚪",
+         _reason("SMA20")),
+        ("SMA50",      f"${sma50:.2f}",
+         "🟢" if votes["SMA50"] > 0 else "🔴" if votes["SMA50"] < 0 else "⚪",
+         _reason("SMA50")),
+        ("Bollinger",  f"{pct_b:.2f} %B",
+         "🟢" if votes["BB"] > 0 else "🔴" if votes["BB"] < 0 else "⚪",
+         _reason("BB")),
+        ("ADX(14)",    f"{adx:.1f}",
+         "🟢" if votes["ADX"] > 0 else "🔴" if votes["ADX"] < 0 else "⚪",
+         _reason("ADX")),
+        ("VWAP",       f"${vwap:.2f}" if vwap > 0 else "N/A",
+         "🟢" if votes["VWAP"] > 0 else "🔴" if votes["VWAP"] < 0 else "⚪",
+         _reason("VWAP")),
+        ("TTM Squeeze","ON \U0001f534" if squeeze_on else "OFF \U0001f7e2",
+         "🟢" if votes["Squeeze"] > 0 else "🔴" if votes["Squeeze"] < 0 else "⚪",
+         _reason("Squeeze")),
+        ("Regime",     regime.value,
+         "🟢" if votes["Regime"] > 0 else "🔴" if votes["Regime"] < 0 else "⚪",
+         _reason("Regime")),
     ]
 
-    # ── Render ───────────────────────────────────────
-    neutral_count = total_signals - bullish_signals - bearish_signals
+    # ── Render 2-zone bar (HTML via .format — no f-string to avoid indent issue) ──
+    html = (
+'<div style="display:grid;grid-template-columns:1fr 1fr;gap:0;'
+'border-radius:8px;overflow:hidden;border:1px solid #30363d;margin:8px 0;">'
 
-    st.subheader(f"📊 Price Forecast — Next {dte} Days ({result.expiration})")
-    st.caption(f"{confidence}  |  {bullish_signals} bullish / {bearish_signals} bearish / {neutral_count} neutral signals")
+'<div style="background:{bias_bg};border-right:1px solid #30363d;padding:14px 16px;">'
+'<div style="font-size:17px;font-weight:700;color:{bias_color};">'
+'{direction_emoji} {direction} {bullish_prob}%'
+'</div>'
+'<div style="font-size:11px;color:{bias_color};opacity:0.8;margin-top:2px;">'
+'{majority_count}/9 {direction_lower} signals'
+'</div>'
+'<div style="font-size:12px;color:#8b949e;margin-top:8px;">'
+'{dte} DTE &nbsp;&middot;&nbsp; &plusmn;${expected_move} (&plusmn;{em_pct}%)'
+'</div>'
+'<div style="font-size:13px;color:#e6edf3;margin-top:4px;">'
+'Range: ${lower} &#8212; ${upper}'
+'</div>'
+'</div>'
 
-    # Probability metrics + expected range
-    fc1, fc2, fc3, fc4 = st.columns(4)
-    fc1.metric("Bullish Probability", f"{bullish_prob:.0f}%")
-    fc2.metric("Bearish Probability", f"{bearish_prob:.0f}%")
-    fc3.metric("1σ Lower Bound", f"${lower:.2f}", help="68% probability price stays above this")
-    fc4.metric("1σ Upper Bound", f"${upper:.2f}", help="68% probability price stays below this")
+'<div style="background:#161b22;padding:14px 16px;">'
+'<div style="margin-bottom:8px;">'
+'<div style="font-size:11px;color:#3fb950;font-weight:700;margin-bottom:2px;">'
+'&#128154; CSP &#8212; Sell Puts BELOW'
+'</div>'
+'<div style="font-size:22px;font-weight:700;color:#3fb950;">${lower}</div>'
+'<div style="font-size:10px;color:#8b949e;">{csp_detail}</div>'
+'</div>'
+'<div style="border-top:1px solid #21262d;margin:8px 0;"></div>'
+'<div>'
+'<div style="font-size:11px;color:#58a6ff;font-weight:700;margin-bottom:2px;">'
+'&#128153; CC &#8212; Sell Calls ABOVE'
+'</div>'
+'<div style="font-size:22px;font-weight:700;color:#58a6ff;">${upper}</div>'
+'<div style="font-size:10px;color:#8b949e;">{cc_detail}</div>'
+'</div>'
+'</div>'
+'</div>'
+    ).format(
+        bias_bg=bias_bg,
+        bias_color=bias_color,
+        direction_emoji=direction_emoji,
+        direction=direction,
+        bullish_prob=f"{bullish_prob:.0f}",
+        majority_count=majority_count,
+        direction_lower=direction.lower(),
+        dte=dte,
+        expected_move=f"{expected_move:.2f}",
+        em_pct=f"{em_pct:.1f}",
+        lower=f"{lower:.2f}",
+        upper=f"{upper:.2f}",
+        csp_detail=csp_detail,
+        cc_detail=cc_detail,
+    )
+    st.markdown(html, unsafe_allow_html=True)
 
-    # Probability bars using st.progress
-    st.caption("🟢 Bullish probability")
-    st.progress(int(bullish_prob) / 100)
-    st.caption("🔴 Bearish probability")
-    st.progress(int(bearish_prob) / 100)
-
-    # Safe zones
-    sz1, sz2 = st.columns(2)
-    sz1.info(f"**📍 CSP Safe Zone** — Below ${lower:.2f}" + (f"\n\n{assign_info}" if assign_info else ""))
-    sz2.info(f"**📍 CC Safe Zone** — Above ${upper:.2f}")
-
-    # Expandable indicator breakdown
-    with st.expander("🔍 Indicator Breakdown", expanded=False):
+    # ── Indicator breakdown expander ─────────────────
+    with st.expander("🔍 Indicator breakdown", expanded=False):
         df = pd.DataFrame(
             indicator_rows,
-            columns=["Indicator", "Value", "Signal", "Contribution"],
+            columns=["Indicator", "Value", "Vote", "Reason"],
         )
         st.dataframe(df, hide_index=True, use_container_width=True)
         st.caption(
-            f"Total adjustment: {total_adj:+.0f} points → "
-            f"Bullish {bullish_prob:.0f}% / "
-            f"Bearish {bearish_prob:.0f}%"
+            f"{bullish_signals} bullish / {bearish_signals} bearish / "
+            f"{neutral_count} neutral  ·  "
+            f"weighted score {total_adj:+.0f} → {bullish_prob:.0f}% bullish"
         )
 
     st.caption(
-        "Probability estimates use technical indicators only. "
+        "Estimates use technical indicators only. "
         "Not financial advice. Options involve substantial risk."
     )
 

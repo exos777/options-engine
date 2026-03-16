@@ -7,6 +7,9 @@ They are separated from app/main.py to keep the main file focused on layout.
 
 from __future__ import annotations
 
+import math
+
+import numpy as np
 import pandas as pd
 import streamlit as st
 
@@ -44,51 +47,195 @@ _REGIME_COLOR = {
 # Market overview
 # ---------------------------------------------------------------------------
 
-def render_market_overview(result: ScreenerResult, strategy: Strategy) -> None:
-    """Render the market overview metric strip and warnings."""
+def render_market_overview(
+    result: ScreenerResult,
+    strategy: Strategy,
+    full_ind: FullIndicators | None = None,
+) -> None:
+    """Render the market overview — 2-row premium-seller dashboard."""
     q = result.quote
     ind = result.indicators
+    em = result.expected_move
 
-    # Price metrics row — exactly 5 columns, no clutter
+    # ── RSI label ──────────────────────────────────────────────────────────
+    rsi = ind.rsi_14
+    if rsi < 30:        rsi_label = "🟢 Oversold"
+    elif rsi < 40:      rsi_label = "🟡 Near Oversold"
+    elif rsi <= 60:     rsi_label = "⚪ Neutral"
+    elif rsi < 70:      rsi_label = "🟡 Near Overbought"
+    else:               rsi_label = "🔴 Overbought"
+
+    # ── ATR % of price ─────────────────────────────────────────────────────
+    atr = ind.atr_14
+    atr_pct = atr / q.price * 100 if q.price > 0 else 0.0
+    atr_label = f"{atr_pct:.1f}% of price"
+
+    # ── Vol Environment (IV30 vs HV30) ─────────────────────────────────────
+    iv30_val: float | None = None
+    hv30_val: float | None = None
+
+    if em > 0 and q.price > 0 and result.dte > 0:
+        iv30_val = (em / q.price) / math.sqrt(max(result.dte, 1) / 365) * 100
+
+    if full_ind is not None:
+        close = full_ind.close.dropna()
+        if len(close) >= 31:
+            log_ret = np.log(close / close.shift(1)).dropna()
+            hv30_val = float(log_ret.tail(30).std() * math.sqrt(252) * 100)
+
+    if iv30_val is not None and hv30_val is not None and hv30_val > 0:
+        iv_ratio = iv30_val / hv30_val
+        if iv_ratio > 1.2:
+            vol_label = "🟢 IV Rich"
+            vol_detail = "good to sell"
+        elif iv_ratio < 0.8:
+            vol_label = "🔴 IV Cheap"
+            vol_detail = "consider waiting"
+        else:
+            vol_label = "🟡 IV Fair"
+            vol_detail = "neutral"
+        vol_display = f"IV {iv30_val:.0f}% / HV {hv30_val:.0f}%"
+    elif iv30_val is not None:
+        vol_label = f"IV ~{iv30_val:.0f}%"
+        vol_detail = "HV unavailable"
+        vol_display = vol_label
+    else:
+        vol_label = "—"
+        vol_detail = ""
+        vol_display = "—"
+
+    # ── Regime ─────────────────────────────────────────────────────────────
+    primary = result.regime.primary
+    regime_delta_color = _REGIME_COLOR.get(primary, "off")
+    secondary_label = result.regime.secondary.value if result.regime.secondary else ""
+
+    # ── Row 1: 5 metrics ───────────────────────────────────────────────────
     col1, col2, col3, col4, col5 = st.columns(5)
 
     pct = q.change_pct * 100
-    pct_label = f"{pct:+.2f}%"
-
-    col1.metric("Price", f"${q.price:.2f}", pct_label)
-    col2.metric("SMA 20", f"${ind.sma_20:.2f}")
-    col3.metric("SMA 50", f"${ind.sma_50:.2f}")
-    col4.metric("RSI (14)", f"{ind.rsi_14:.1f}")
-    col5.metric("ATR (14)", f"${ind.atr_14:.2f}")
-
-    st.caption(
-        f"**Expiration:** {result.expiration}  ·  "
-        f"**DTE:** {result.dte}  ·  "
-        f"**Weekly ATR est.:** ${ind.weekly_atr_est:.2f}"
-        + (
-            f"  ·  **Expected move ±:** ${result.expected_move:.2f}"
-            if result.expected_move > 0
-            else ""
-        )
-    )
-
-    # Regime badge
-    primary = result.regime.primary
-    regime_delta_color = _REGIME_COLOR.get(primary, "off")
-    badge_col, _, warn_col = st.columns([2, 1, 5])
-    badge_col.metric(
+    col1.metric("Price", f"${q.price:.2f}", f"{pct:+.2f}%")
+    col2.metric("RSI (14)", f"{rsi:.1f}", rsi_label)
+    col3.metric("ATR (14)", f"${atr:.2f}", atr_label)
+    col4.metric("Vol Environment", vol_display, vol_detail)
+    col5.metric(
         "Chart Regime",
         primary.value,
-        result.regime.secondary.value if result.regime.secondary else "",
+        secondary_label,
         delta_color=regime_delta_color,
     )
 
-    # Earnings warning (shown as error for high visibility)
+    # ── Row 2: expected move bar ────────────────────────────────────────────
+    if em > 0:
+        lower = q.price - em
+        upper = q.price + em
+        em_pct = em / q.price * 100
+        row2 = (
+            '<p style="font-size:12px;color:#8b949e;margin:6px 0 4px;">'
+            '<b>Expiration:</b> {exp} &nbsp;&middot;&nbsp; '
+            '<b>DTE:</b> {dte} &nbsp;&middot;&nbsp; '
+            '<b>Expected Move:</b> &plusmn;${em} (&plusmn;{emp}%) &nbsp;&middot;&nbsp; '
+            '<span style="color:#3fb950;font-weight:600;">CSP safe: below ${lo}</span>'
+            ' &nbsp;&middot;&nbsp; '
+            '<span style="color:#58a6ff;font-weight:600;">CC safe: above ${hi}</span>'
+            '</p>'
+        ).format(
+            exp=result.expiration, dte=result.dte,
+            em=f"{em:.2f}", emp=f"{em_pct:.1f}",
+            lo=f"{lower:.2f}", hi=f"{upper:.2f}",
+        )
+        st.markdown(row2, unsafe_allow_html=True)
+    else:
+        st.caption(f"**Expiration:** {result.expiration}  ·  **DTE:** {result.dte}")
+
+    # ── Earnings warning ────────────────────────────────────────────────────
     if q.earnings_date:
         from data.provider import earnings_warning
         ew = earnings_warning(q, result.expiration)
         if ew:
             st.error(ew, icon="🗓️")
+
+
+# ---------------------------------------------------------------------------
+# Signal Dashboard (collapsed expander)
+# ---------------------------------------------------------------------------
+
+def render_signal_dashboard(
+    result: ScreenerResult,
+    full_ind: FullIndicators | None = None,
+) -> None:
+    """Collapsed expander with all 9 indicator statuses + TTM Squeeze alert."""
+    ind = result.indicators
+    q = result.quote
+    regime = result.regime.primary
+
+    # Pull MACD and BB from full_ind if available
+    macd_line = 0.0
+    hist_rising = False
+    pct_b = 0.5
+    if full_ind is not None:
+        md = full_ind.macd_data
+        macd_line = float(md.macd_line.iloc[-1])
+        last_hist = float(md.histogram.iloc[-1])
+        prev_hist = float(md.histogram.iloc[-2])
+        hist_rising = last_hist > prev_hist
+        pb = full_ind.bb.pct_b.iloc[-1]
+        if not pd.isna(pb):
+            pct_b = float(pb)
+
+    adx = getattr(ind, "adx_14", 0.0) or 0.0
+    vwap = getattr(ind, "vwap", 0.0) or 0.0
+    squeeze_on = getattr(ind, "squeeze_on", False)
+
+    def _sig(val: float) -> str:
+        return "🟢" if val > 0 else "🔴" if val < 0 else "⚪"
+
+    rows = [
+        ("RSI (14)", f"{ind.rsi_14:.1f}",
+         _sig(30 - ind.rsi_14 if ind.rsi_14 < 50 else ind.rsi_14 - 70),
+         "Oversold" if ind.rsi_14 < 30 else "Overbought" if ind.rsi_14 > 70 else "Neutral"),
+        ("MACD", f"{macd_line:.2f}",
+         _sig(1 if (macd_line > 0 and hist_rising) else (-1 if (macd_line < 0 and not hist_rising) else 0)),
+         ("Positive + rising" if macd_line > 0 and hist_rising
+          else "Positive + falling" if macd_line > 0
+          else "Negative + rising" if hist_rising
+          else "Negative + falling")),
+        ("SMA 20", f"${ind.sma_20:.2f}",
+         _sig(q.price - ind.sma_20),
+         f"Price {'above' if q.price > ind.sma_20 else 'below'} SMA20"),
+        ("SMA 50", f"${ind.sma_50:.2f}",
+         _sig(q.price - ind.sma_50),
+         f"Price {'above' if q.price > ind.sma_50 else 'below'} SMA50"),
+        ("Bollinger %B", f"{pct_b:.2f}",
+         _sig(-1 if pct_b > 0.8 else (1 if pct_b < 0.2 else 0)),
+         "Upper band" if pct_b > 0.8 else "Lower band" if pct_b < 0.2 else "Mid-band"),
+        ("ADX (14)", f"{adx:.1f}",
+         "⚪" if adx < 20 else ("🟢" if regime == ChartRegime.BULLISH else "🔴" if regime == ChartRegime.BEARISH else "⚪"),
+         "Ranging" if adx < 20 else "Trending strong" if adx > 30 else "Trending"),
+        ("VWAP", f"${vwap:.2f}" if vwap > 0 else "N/A",
+         _sig(q.price - vwap) if vwap > 0 else "⚪",
+         f"Price {'above' if q.price > vwap else 'below'} VWAP" if vwap > 0 else "—"),
+        ("TTM Squeeze", "ON 🔴" if squeeze_on else "OFF 🟢",
+         "🔴" if squeeze_on else "🟢",
+         "Compression — await release" if squeeze_on else "Volatility releasing"),
+        ("Regime", regime.value,
+         _sig({"Bullish": 1, "Near Support": 1, "Neutral": 0,
+               "Near Resistance": -1, "Overextended": -1, "Bearish": -1}.get(regime.value, 0)),
+         result.regime.description.split("|")[0].strip()),
+    ]
+
+    with st.expander("📊 Signal Dashboard", expanded=False):
+        if squeeze_on:
+            st.warning(
+                "⚡ Squeeze ACTIVE — Bollinger Bands inside Keltner Channels. "
+                "Big move imminent. Consider waiting for squeeze release before selling.",
+                icon="⚡",
+            )
+        df = pd.DataFrame(rows, columns=["Indicator", "Value", "Signal", "Context"])
+        st.dataframe(df, hide_index=True, use_container_width=True)
+        st.caption(
+            f"SMA20 ${ind.sma_20:.2f}  ·  SMA50 ${ind.sma_50:.2f}  ·  "
+            f"ATR est. weekly ${ind.weekly_atr_est:.2f}"
+        )
 
 
 # ---------------------------------------------------------------------------

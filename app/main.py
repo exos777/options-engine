@@ -439,9 +439,12 @@ if result is None:
 # A. Market Overview
 st.divider()
 st.subheader(f"Market Overview — {result.quote.ticker}")
-rec_ui.render_market_overview(result, strategy)
+rec_ui.render_market_overview(result, strategy, full_ind)
 
-# A2. Price Forecast (probability-based)
+# A2. Signal Dashboard (collapsed)
+rec_ui.render_signal_dashboard(result, full_ind)
+
+# A3. Price Forecast (2-zone bias bar)
 rec_ui.render_price_forecast(result, strategy, full_ind)
 
 # B. Technical Chart

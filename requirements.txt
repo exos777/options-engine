@@ -7,3 +7,4 @@ httpx>=0.27.0
 python-dotenv>=1.0.0
 pytest>=8.0.0
 pytest-mock>=3.12.0
+schwab-py>=1.0.0

@@ -32,6 +32,7 @@ Thumbs.db
 # Secrets
 .env
 *.env
+schwab_token.json
 
 # Logs
 *.log

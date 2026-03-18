@@ -27,7 +27,17 @@ for _mod_name in [
 
 import streamlit as st
 
-from data import provider as dp
+from config import schwab_available
+from data import provider as _yf_provider
+
+# Choose data provider based on sidebar toggle (default to Schwab if available)
+if "data_source" not in st.session_state:
+    st.session_state["data_source"] = "Schwab" if schwab_available() else "Yahoo Finance"
+
+if st.session_state["data_source"] == "Schwab" and schwab_available():
+    from data import schwab_provider as dp
+else:
+    dp = _yf_provider
 from indicators.technical import calculate_full_indicators
 from indicators.support_resistance import find_support_resistance
 from scoring.regime import classify_regime
@@ -51,7 +61,8 @@ st.set_page_config(
 )
 
 st.title("📈 Weekly Options Screener")
-st.caption("Covered Calls & Cash-Secured Puts — powered by yfinance")
+_source = st.session_state.get("data_source", "Yahoo Finance")
+st.caption(f"Covered Calls & Cash-Secured Puts — powered by {_source}")
 
 st.markdown("""
 <style>
@@ -85,6 +96,16 @@ div[data-testid="column"] > div > div > div > button:focus {
 
 with st.sidebar:
     st.header("⚙️ Settings")
+
+    # Data source selector
+    _sources = ["Schwab", "Yahoo Finance"] if schwab_available() else ["Yahoo Finance"]
+    _current = st.session_state.get("data_source", _sources[0])
+    _idx = _sources.index(_current) if _current in _sources else 0
+    data_source = st.radio("Data Source", _sources, index=_idx, horizontal=True)
+    if data_source != st.session_state.get("data_source"):
+        st.session_state["data_source"] = data_source
+        st.cache_data.clear()
+        st.rerun()
 
     run_button = st.button("🔍 Run Screener", type="primary", use_container_width=True)
 

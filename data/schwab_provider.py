@@ -118,8 +118,13 @@ def get_client():
         logger.error("Schwab token from secrets failed: %s", e, exc_info=True)
         if _on_cloud:
             import streamlit as st
-            st.error(f"Schwab auth failed: {e}")
-            st.code(f"type={type(token_json).__name__}, repr={repr(token_json)[:200]}")
+            _msg = str(e)
+            if "oauth" in _msg.lower() or "refresh" in _msg.lower() or "token" in _msg.lower():
+                st.error("Schwab refresh token expired. Run `schwab_auth.py` locally "
+                         "to generate a new token, then update SCHWAB_TOKEN_JSON in "
+                         "Streamlit secrets. (Schwab tokens expire every 7 days.)")
+            else:
+                st.error(f"Schwab auth failed: {e}")
             st.stop()
         logger.warning("Schwab: failed to auth from st.secrets token: %s", e)
 

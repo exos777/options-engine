@@ -91,16 +91,25 @@ def get_client():
         import streamlit as st
         token_json = st.secrets.get("SCHWAB_TOKEN_JSON", "")
         if token_json:
-            token_path.write_text(token_json)
+            # Write to a writable location (token_path may be read-only on Cloud)
+            import tempfile
+            tmp_token = Path(tempfile.gettempdir()) / "schwab_token.json"
+            tmp_token.write_text(token_json)
             _client = schwab.auth.client_from_token_file(
-                str(token_path), app_key, app_secret
+                str(tmp_token), app_key, app_secret
             )
             logger.info("Schwab: authenticated from Streamlit secrets token")
             return _client
     except Exception as e:
-        logger.debug("Schwab: no token in st.secrets (%s)", e)
+        logger.warning("Schwab: failed to auth from st.secrets token: %s", e)
 
     # 3. Fall back to browser-based login flow (local dev only)
+    import os as _os
+    if _os.environ.get("STREAMLIT_SERVER_HEADLESS") or _os.environ.get("STREAMLIT_SHARING_MODE"):
+        raise RuntimeError(
+            "Schwab token expired or invalid on Cloud. "
+            "Re-run schwab_auth.py locally and update SCHWAB_TOKEN_JSON in Streamlit secrets."
+        )
     callback_url = "https://127.0.0.1"
     _client = schwab.auth.client_from_login_flow(
         app_key, app_secret, callback_url, str(token_path)

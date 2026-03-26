@@ -27,16 +27,19 @@ try:
 except AttributeError:
     pass
 
-# Patch curl_cffi sessions to disable cert verification before yfinance imports it
+# Patch curl_cffi sessions to disable cert verification before yfinance imports it.
+# Store the original __init__ on the class itself so importlib.reload() cannot
+# create a recursive wrapper chain (_patched -> _patched -> ... -> RecursionError).
 try:
     import curl_cffi.requests as _cffi
-    _orig_init = _cffi.Session.__init__
+    if not hasattr(_cffi.Session, "_orig_init_unpatched"):
+        _cffi.Session._orig_init_unpatched = _cffi.Session.__init__
 
-    def _patched_init(self, *args, **kwargs):
-        kwargs.setdefault("verify", False)
-        _orig_init(self, *args, **kwargs)
+        def _patched_init(self, *args, **kwargs):
+            kwargs.setdefault("verify", False)
+            _cffi.Session._orig_init_unpatched(self, *args, **kwargs)
 
-    _cffi.Session.__init__ = _patched_init
+        _cffi.Session.__init__ = _patched_init
 except Exception:
     pass
 

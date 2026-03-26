@@ -1,0 +1,34 @@
+Schwab API & Token Troubleshooting Steps
+=========================================
+
+1. Verify .env has your Schwab credentials:
+   SCHWAB_APP_KEY = "your_actual_key"
+   SCHWAB_APP_SECRET = "your_actual_secret"
+
+2. Generate the token file by running:
+   .venv\Scripts\python.exe .venv\Scripts\schwab-generate-token.py --api_key "YOUR_KEY" --app_secret "YOUR_SECRET" --callback_url "https://127.0.0.1" --token_file "schwab_token.json"
+
+3. A browser window opens — log in to your Schwab account.
+
+4. After login, Schwab redirects to https://127.0.0.1/...
+   The page will show an error — that's normal.
+   Copy the ENTIRE URL from the browser address bar.
+
+5. Paste that URL back into the terminal where the script is waiting.
+
+6. The script saves schwab_token.json to the project root.
+
+7. Verify it worked:
+   .venv\Scripts\python.exe -c "from config import schwab_available; print(schwab_available())"
+   Should print: True
+
+8. Launch the app:
+   .venv\Scripts\python.exe -m streamlit run app/main.py
+   Schwab will be the default data source in the sidebar.
+
+Common Issues
+-------------
+- "Schwab available: False" — schwab_token.json is missing or .env keys are wrong.
+- Token expired — re-run step 2 to generate a new token.
+- RecursionError on startup — update data/provider.py SSL patch (fixed 2026-03-26).
+- Browser doesn't open — add --browser flag (e.g. --browser chrome).

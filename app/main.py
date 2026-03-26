@@ -94,10 +94,31 @@ with st.sidebar:
     st.header("⚙️ Settings")
 
     # Data source selector
-    _sources = ["Schwab", "Yahoo Finance"] if schwab_available() else ["Yahoo Finance"]
+    _schwab_ok = schwab_available()
+    _sources = ["Schwab", "Yahoo Finance"] if _schwab_ok else ["Yahoo Finance"]
     _current = st.session_state.get("data_source", _sources[0])
     _idx = _sources.index(_current) if _current in _sources else 0
     data_source = st.radio("Data Source", _sources, index=_idx, horizontal=True)
+
+    if not _schwab_ok:
+        with st.expander("Schwab debug"):
+            from config import SCHWAB_APP_KEY, SCHWAB_APP_SECRET
+            _k = SCHWAB_APP_KEY
+            _has_key = bool(_k) and _k not in ("your_key_here", "your_app_key_here")
+            st.text(f"APP_KEY set: {_has_key}")
+            st.text(f"APP_SECRET set: {bool(SCHWAB_APP_SECRET)}")
+            _tf = os.path.exists(os.path.join(os.path.dirname(os.path.dirname(__file__)), "schwab_token.json"))
+            st.text(f"Token file exists: {_tf}")
+            try:
+                _st_tok = bool(st.secrets.get("SCHWAB_TOKEN_JSON", ""))
+                st.text(f"SCHWAB_TOKEN_JSON in secrets: {_st_tok}")
+            except Exception as _e:
+                st.text(f"secrets error: {_e}")
+            try:
+                _st_key = bool(st.secrets.get("SCHWAB_APP_KEY", ""))
+                st.text(f"SCHWAB_APP_KEY in secrets: {_st_key}")
+            except Exception as _e:
+                st.text(f"secrets key error: {_e}")
     if data_source != st.session_state.get("data_source"):
         st.session_state["data_source"] = data_source
         st.cache_data.clear()

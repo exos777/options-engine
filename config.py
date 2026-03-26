@@ -34,5 +34,15 @@ def schwab_available() -> bool:
     """Return True if Schwab credentials are configured and a token exists."""
     if not SCHWAB_APP_KEY or SCHWAB_APP_KEY in ("your_key_here", "your_app_key_here"):
         return False
+    # Local: check for token file on disk
     token_path = Path(__file__).parent / "schwab_token.json"
-    return token_path.exists()
+    if token_path.exists():
+        return True
+    # Streamlit Cloud: check for token in secrets
+    try:
+        import streamlit as st
+        if st.secrets.get("SCHWAB_TOKEN_JSON", ""):
+            return True
+    except Exception:
+        pass
+    return False

@@ -87,29 +87,36 @@ def get_client():
             logger.warning("Schwab: token file invalid (%s), will re-auth", e)
 
     # 2. Try loading token JSON from Streamlit secrets (Cloud deployment)
+    _on_cloud = not token_path.exists()  # no local token file = likely Cloud
     try:
         import streamlit as st
         token_json = st.secrets.get("SCHWAB_TOKEN_JSON", "")
         if token_json:
-            # Write to a writable location (token_path may be read-only on Cloud)
             import tempfile
             tmp_token = Path(tempfile.gettempdir()) / "schwab_token.json"
-            tmp_token.write_text(token_json)
+            # st.secrets may return a non-str type; force to str
+            tmp_token.write_text(str(token_json))
             _client = schwab.auth.client_from_token_file(
                 str(tmp_token), app_key, app_secret
             )
             logger.info("Schwab: authenticated from Streamlit secrets token")
             return _client
+        elif _on_cloud:
+            raise RuntimeError(
+                "SCHWAB_TOKEN_JSON not found in Streamlit secrets. "
+                "Run schwab_auth.py locally and paste the token JSON into secrets."
+            )
+    except RuntimeError:
+        raise
     except Exception as e:
+        if _on_cloud:
+            raise RuntimeError(
+                f"Schwab token from secrets failed: {e}. "
+                "Re-run schwab_auth.py locally and update SCHWAB_TOKEN_JSON in Streamlit secrets."
+            )
         logger.warning("Schwab: failed to auth from st.secrets token: %s", e)
 
     # 3. Fall back to browser-based login flow (local dev only)
-    import os as _os
-    if _os.environ.get("STREAMLIT_SERVER_HEADLESS") or _os.environ.get("STREAMLIT_SHARING_MODE"):
-        raise RuntimeError(
-            "Schwab token expired or invalid on Cloud. "
-            "Re-run schwab_auth.py locally and update SCHWAB_TOKEN_JSON in Streamlit secrets."
-        )
     callback_url = "https://127.0.0.1"
     _client = schwab.auth.client_from_login_flow(
         app_key, app_secret, callback_url, str(token_path)

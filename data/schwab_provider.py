@@ -94,10 +94,12 @@ def get_client():
         if token_json:
             import tempfile
             tmp_token = Path(tempfile.gettempdir()) / "schwab_token.json"
-            # Normalize: TOML may parse to dict or add whitespace/newlines
+            # Normalize: TOML may add whitespace/newlines or parse to dict
             import json
             if isinstance(token_json, str):
-                token_data = json.loads(token_json)
+                # Strip control characters that TOML multi-line strings introduce
+                clean = token_json.replace("\n", "").replace("\r", "").replace("\t", "")
+                token_data = json.loads(clean)
             else:
                 token_data = token_json
             tmp_token.write_text(json.dumps(token_data))

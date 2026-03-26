@@ -96,24 +96,23 @@ def get_client():
             tmp_token = Path(tempfile.gettempdir()) / "schwab_token.json"
             # st.secrets may return a non-str type; force to str
             tmp_token.write_text(str(token_json))
+            logger.info("Schwab: wrote token to %s (%d bytes)", tmp_token, tmp_token.stat().st_size)
             _client = schwab.auth.client_from_token_file(
                 str(tmp_token), app_key, app_secret
             )
             logger.info("Schwab: authenticated from Streamlit secrets token")
             return _client
         elif _on_cloud:
-            raise RuntimeError(
-                "SCHWAB_TOKEN_JSON not found in Streamlit secrets. "
-                "Run schwab_auth.py locally and paste the token JSON into secrets."
-            )
-    except RuntimeError:
-        raise
+            import streamlit as st
+            st.error("SCHWAB_TOKEN_JSON not found in Streamlit secrets. "
+                     "Run schwab_auth.py locally and paste the token JSON into secrets.")
+            st.stop()
     except Exception as e:
+        logger.error("Schwab token from secrets failed: %s", e, exc_info=True)
         if _on_cloud:
-            raise RuntimeError(
-                f"Schwab token from secrets failed: {e}. "
-                "Re-run schwab_auth.py locally and update SCHWAB_TOKEN_JSON in Streamlit secrets."
-            )
+            import streamlit as st
+            st.error(f"Schwab auth failed: {e}")
+            st.stop()
         logger.warning("Schwab: failed to auth from st.secrets token: %s", e)
 
     # 3. Fall back to browser-based login flow (local dev only)

@@ -94,8 +94,9 @@ def get_client():
         if token_json:
             import tempfile
             tmp_token = Path(tempfile.gettempdir()) / "schwab_token.json"
-            # st.secrets may return a non-str type; force to str
-            tmp_token.write_text(str(token_json))
+            # st.secrets parses TOML into a dict; convert back to JSON
+            import json
+            tmp_token.write_text(json.dumps(token_json) if not isinstance(token_json, str) else token_json)
             logger.info("Schwab: wrote token to %s (%d bytes)", tmp_token, tmp_token.stat().st_size)
             _client = schwab.auth.client_from_token_file(
                 str(tmp_token), app_key, app_secret

@@ -113,6 +113,7 @@ def get_client():
         if _on_cloud:
             import streamlit as st
             st.error(f"Schwab auth failed: {e}")
+            st.code(f"type={type(token_json).__name__}, repr={repr(token_json)[:200]}")
             st.stop()
         logger.warning("Schwab: failed to auth from st.secrets token: %s", e)
 

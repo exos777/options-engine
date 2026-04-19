@@ -1,4 +1,5 @@
 [server]
+port = 8501
 headless = true
 runOnSave = false
 

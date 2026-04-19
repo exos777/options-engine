@@ -58,6 +58,39 @@ def _token_path() -> Path:
     return Path(__file__).resolve().parent.parent / "schwab_token.json"
 
 
+def _is_oauth_error(e: Exception) -> bool:
+    """Check if an exception is an OAuth/token-refresh error."""
+    type_name = type(e).__name__
+    if "OAuth" in type_name or "Token" in type_name:
+        return True
+    msg = str(e).lower()
+    return any(kw in msg for kw in ("oauth", "refresh", "token", "unauthorized"))
+
+
+def _validate_client(client) -> None:
+    """Make a lightweight API call to force token refresh and validate auth."""
+    resp = client.get_quote("AAPL")
+    resp.raise_for_status()
+
+
+def _handle_auth_failure(e: Exception) -> None:
+    """Show user-friendly error on Streamlit Cloud for auth failures, then stop."""
+    global _client
+    _client = None  # clear cached broken client
+    try:
+        import streamlit as st
+        st.error(
+            "**Schwab refresh token expired.** "
+            "Run `schwab_auth.py` locally to generate a new token, "
+            "then update `SCHWAB_TOKEN_JSON` in Streamlit secrets. "
+            "(Schwab tokens expire every 7 days.)\n\n"
+            f"Error: {e}"
+        )
+        st.stop()
+    except ImportError:
+        raise
+
+
 def get_client():
     """Return an authenticated Schwab client (cached as singleton)."""
     global _client
@@ -78,13 +111,15 @@ def get_client():
     # 1. Try loading from existing token file
     if token_path.exists():
         try:
-            _client = schwab.auth.client_from_token_file(
+            candidate = schwab.auth.client_from_token_file(
                 str(token_path), app_key, app_secret
             )
+            _validate_client(candidate)
+            _client = candidate
             logger.info("Schwab: authenticated from token file")
             return _client
         except Exception as e:
-            logger.warning("Schwab: token file invalid (%s), will re-auth", e)
+            logger.warning("Schwab: token file auth failed (%s), will try other methods", e)
 
     # 2. Try loading token JSON from Streamlit secrets (Cloud deployment)
     _on_cloud = not token_path.exists()  # no local token file = likely Cloud
@@ -104,9 +139,11 @@ def get_client():
                 token_data = token_json
             tmp_token.write_text(json.dumps(token_data))
             logger.info("Schwab: wrote token to %s (%d bytes)", tmp_token, tmp_token.stat().st_size)
-            _client = schwab.auth.client_from_token_file(
+            candidate = schwab.auth.client_from_token_file(
                 str(tmp_token), app_key, app_secret
             )
+            _validate_client(candidate)
+            _client = candidate
             logger.info("Schwab: authenticated from Streamlit secrets token")
             return _client
         elif _on_cloud:
@@ -117,19 +154,11 @@ def get_client():
     except Exception as e:
         logger.error("Schwab token from secrets failed: %s", e, exc_info=True)
         if _on_cloud:
-            import streamlit as st
-            _msg = str(e)
-            if "oauth" in _msg.lower() or "refresh" in _msg.lower() or "token" in _msg.lower():
-                st.error("Schwab refresh token expired. Run `schwab_auth.py` locally "
-                         "to generate a new token, then update SCHWAB_TOKEN_JSON in "
-                         "Streamlit secrets. (Schwab tokens expire every 7 days.)")
-            else:
-                st.error(f"Schwab auth failed: {e}")
-            st.stop()
+            _handle_auth_failure(e)
         logger.warning("Schwab: failed to auth from st.secrets token: %s", e)
 
     # 3. Fall back to browser-based login flow (local dev only)
-    callback_url = "https://127.0.0.1"
+    callback_url = "https://127.0.0.1:8182"
     _client = schwab.auth.client_from_login_flow(
         app_key, app_secret, callback_url, str(token_path)
     )
@@ -141,23 +170,13 @@ def get_client():
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _safe_float(val, default: float = 0.0) -> float:
-    try:
-        if val is None:
-            return default
-        return float(val)
-    except (TypeError, ValueError):
-        return default
-
-
-def _safe_int(val, default: int = 0) -> int:
-    try:
-        if val is None:
-            return default
-        return int(val)
-    except (TypeError, ValueError):
-        return default
-
+from data.common import (
+    safe_float as _safe_float,
+    safe_int as _safe_int,
+    nearest_weekly_expiration as _nearest_weekly_expiration_impl,
+    days_to_expiration,
+    earnings_warning,
+)
 
 # ---------------------------------------------------------------------------
 # Public API — mirrors data/provider.py
@@ -168,83 +187,80 @@ from strategies.models import OptionContract, Quote
 
 
 def get_quote(symbol: str) -> Quote:
-    """Fetch real-time quote from Schwab."""
-    c = get_client()
-    resp = c.get_quote(symbol.upper().strip())
-    resp.raise_for_status()
-    data = resp.json()
+    """Fetch real-time quote from Schwab, fall back to yfinance on failure."""
+    global _client
+    try:
+        c = get_client()
+        resp = c.get_quote(symbol.upper().strip())
+        resp.raise_for_status()
+        data = resp.json()
 
-    q = data[symbol.upper().strip()]["quote"]
+        q = data[symbol.upper().strip()]["quote"]
 
-    price = _safe_float(q.get("lastPrice"))
-    prev_close = _safe_float(q.get("closePrice")) or price
-    change = price - prev_close
-    change_pct = change / prev_close if prev_close != 0 else 0.0
-    volume = _safe_int(q.get("totalVolume"))
-    avg_vol = _safe_int(q.get("averageVolume10Days"))  # Schwab offers 10-day avg
+        price = _safe_float(q.get("lastPrice"))
+        prev_close = _safe_float(q.get("closePrice")) or price
+        change = price - prev_close
+        change_pct = change / prev_close if prev_close != 0 else 0.0
+        volume = _safe_int(q.get("totalVolume"))
+        avg_vol = _safe_int(q.get("averageVolume10Days"))
 
-    # Schwab doesn't provide earnings date in quotes — leave None
-    return Quote(
-        ticker=symbol.upper().strip(),
-        price=price,
-        prev_close=prev_close,
-        change=change,
-        change_pct=change_pct,
-        volume=volume,
-        avg_volume=avg_vol,
-        market_cap=None,
-        earnings_date=None,
-    )
+        return Quote(
+            ticker=symbol.upper().strip(),
+            price=price,
+            prev_close=prev_close,
+            change=change,
+            change_pct=change_pct,
+            volume=volume,
+            avg_volume=avg_vol,
+            market_cap=None,
+            earnings_date=None,
+        )
+    except Exception as e:
+        if _is_oauth_error(e):
+            _client = None
+        logger.warning("Schwab quote failed (%s), falling back to yfinance", e)
+        from data.provider import get_quote as yf_quote
+        return yf_quote(symbol)
 
 
 def get_expirations(symbol: str) -> tuple[str, ...]:
     """Return available option expiration dates as ISO strings."""
-    import schwab.client
+    global _client
+    try:
+        import schwab.client
 
-    c = get_client()
-    resp = c.get_option_chain(
-        symbol.upper().strip(),
-        contract_type=schwab.client.Client.Options.ContractType.CALL,
-        strike_count=1,
-    )
-    resp.raise_for_status()
-    chain = resp.json()
+        c = get_client()
+        resp = c.get_option_chain(
+            symbol.upper().strip(),
+            contract_type=schwab.client.Client.Options.ContractType.CALL,
+            strike_count=1,
+        )
+        resp.raise_for_status()
+        chain = resp.json()
 
-    # Extract unique expiration dates from callExpDateMap keys
-    # Keys look like "2026-03-20:4" (date:DTE)
-    exp_dates = set()
-    for key in chain.get("callExpDateMap", {}):
-        date_str = key.split(":")[0]
-        exp_dates.add(date_str)
-    for key in chain.get("putExpDateMap", {}):
-        date_str = key.split(":")[0]
-        exp_dates.add(date_str)
+        exp_dates = set()
+        for key in chain.get("callExpDateMap", {}):
+            date_str = key.split(":")[0]
+            exp_dates.add(date_str)
+        for key in chain.get("putExpDateMap", {}):
+            date_str = key.split(":")[0]
+            exp_dates.add(date_str)
 
-    if not exp_dates:
-        raise ValueError(f"No option expirations found for '{symbol}'.")
+        if not exp_dates:
+            raise ValueError(f"No option expirations found for '{symbol}'.")
 
-    return tuple(sorted(exp_dates))
-
-
-def _nearest_weekly_expiration(expirations: tuple[str, ...]) -> str:
-    """Return the nearest Friday expiration, or nearest overall."""
-    today = date.today()
-    candidates = []
-    for exp_str in expirations:
-        exp = date.fromisoformat(exp_str)
-        if exp >= today:
-            candidates.append(exp)
-    if not candidates:
-        raise ValueError("No future expirations found.")
-    friday_candidates = [e for e in candidates if e.weekday() == 4]
-    if friday_candidates:
-        return friday_candidates[0].isoformat()
-    return sorted(candidates)[0].isoformat()
+        return tuple(sorted(exp_dates))
+    except BaseException as e:
+        if _is_oauth_error(e):
+            _client = None
+        logger.warning("Schwab expirations failed (%s), falling back to yfinance", e)
+        from data.provider import get_expirations as yf_expirations
+        return yf_expirations(symbol)
 
 
 def get_nearest_weekly_expiration(symbol: str) -> str:
     """Return the nearest weekly (Friday) expiration for symbol."""
-    return _nearest_weekly_expiration(get_expirations(symbol))
+    return _nearest_weekly_expiration_impl(get_expirations(symbol))
 
 
 def get_option_chain(
@@ -253,72 +269,77 @@ def get_option_chain(
 ) -> tuple[list[OptionContract], list[OptionContract]]:
     """
     Fetch the full option chain for symbol at expiration from Schwab.
-    Returns (calls, puts) as lists of OptionContract.
+    Falls back to yfinance on any failure.
     """
-    import schwab.client
+    try:
+        import schwab.client
 
-    c = get_client()
+        c = get_client()
 
-    exp_date = date.fromisoformat(expiration)
-    resp = c.get_option_chain(
-        symbol.upper().strip(),
-        contract_type=schwab.client.Client.Options.ContractType.ALL,
-        from_date=exp_date,
-        to_date=exp_date,
-        include_underlying_quote=True,
-    )
-    resp.raise_for_status()
-    chain = resp.json()
+        exp_date = date.fromisoformat(expiration)
+        resp = c.get_option_chain(
+            symbol.upper().strip(),
+            contract_type=schwab.client.Client.Options.ContractType.ALL,
+            from_date=exp_date,
+            to_date=exp_date,
+            include_underlying_quote=True,
+        )
+        resp.raise_for_status()
+        chain = resp.json()
 
-    # Get spot price from underlying quote
-    spot_price = _safe_float(
-        chain.get("underlyingPrice")
-        or chain.get("underlying", {}).get("last")
-    )
-    dte = days_to_expiration(expiration)
+        spot_price = _safe_float(
+            chain.get("underlyingPrice")
+            or chain.get("underlying", {}).get("last")
+        )
+        dte = days_to_expiration(expiration)
 
-    def _parse_contracts(exp_date_map: dict, option_type: str) -> list[OptionContract]:
-        contracts = []
-        for date_key, strikes in exp_date_map.items():
-            for strike_str, contract_list in strikes.items():
-                for contract in contract_list:
-                    iv = _safe_float(contract.get("volatility")) / 100 if contract.get("volatility") else None
-                    delta = _safe_float(contract.get("delta")) or None
-                    gamma = _safe_float(contract.get("gamma")) or None
-                    theta = _safe_float(contract.get("theta")) or None
-                    vega = _safe_float(contract.get("vega")) or None
+        def _parse_contracts(exp_date_map: dict, option_type: str) -> list[OptionContract]:
+            contracts = []
+            for date_key, strikes in exp_date_map.items():
+                for strike_str, contract_list in strikes.items():
+                    for contract in contract_list:
+                        iv = _safe_float(contract.get("volatility")) / 100 if contract.get("volatility") else None
+                        delta = _safe_float(contract.get("delta")) or None
+                        gamma = _safe_float(contract.get("gamma")) or None
+                        theta = _safe_float(contract.get("theta")) or None
+                        vega = _safe_float(contract.get("vega")) or None
 
-                    strike = _safe_float(contract.get("strikePrice"))
+                        strike = _safe_float(contract.get("strikePrice"))
 
-                    # Backfill missing Greeks via Black-Scholes
-                    if iv and spot_price > 0 and any(g is None for g in (delta, gamma, theta, vega)):
-                        bs = backfill_greeks(strike, spot_price, dte, iv, option_type)
-                        if bs is not None:
-                            delta = delta if delta is not None else bs.delta
-                            gamma = gamma if gamma is not None else bs.gamma
-                            theta = theta if theta is not None else bs.theta
-                            vega = vega if vega is not None else bs.vega
+                        if iv and spot_price > 0 and any(g is None for g in (delta, gamma, theta, vega)):
+                            bs = backfill_greeks(strike, spot_price, dte, iv, option_type)
+                            if bs is not None:
+                                delta = delta if delta is not None else bs.delta
+                                gamma = gamma if gamma is not None else bs.gamma
+                                theta = theta if theta is not None else bs.theta
+                                vega = vega if vega is not None else bs.vega
 
-                    contracts.append(OptionContract(
-                        strike=strike,
-                        expiration=expiration,
-                        option_type=option_type,
-                        bid=_safe_float(contract.get("bid")),
-                        ask=_safe_float(contract.get("ask")),
-                        last=_safe_float(contract.get("last")),
-                        volume=_safe_int(contract.get("totalVolume")),
-                        open_interest=_safe_int(contract.get("openInterest")),
-                        implied_volatility=iv,
-                        delta=delta,
-                        gamma=gamma,
-                        theta=theta,
-                        vega=vega,
-                    ))
-        return contracts
+                        contracts.append(OptionContract(
+                            strike=strike,
+                            expiration=expiration,
+                            option_type=option_type,
+                            bid=_safe_float(contract.get("bid")),
+                            ask=_safe_float(contract.get("ask")),
+                            last=_safe_float(contract.get("last")),
+                            volume=_safe_int(contract.get("totalVolume")),
+                            open_interest=_safe_int(contract.get("openInterest")),
+                            implied_volatility=iv,
+                            delta=delta,
+                            gamma=gamma,
+                            theta=theta,
+                            vega=vega,
+                        ))
+            return contracts
 
-    calls = _parse_contracts(chain.get("callExpDateMap", {}), "call")
-    puts = _parse_contracts(chain.get("putExpDateMap", {}), "put")
-    return calls, puts
+        calls = _parse_contracts(chain.get("callExpDateMap", {}), "call")
+        puts = _parse_contracts(chain.get("putExpDateMap", {}), "put")
+        return calls, puts
+    except BaseException as e:
+        if _is_oauth_error(e):
+            _client = None
+        logger.warning("Schwab option chain failed (%s), falling back to yfinance", e)
+        from data.provider import get_option_chain as yf_chain
+        return yf_chain(symbol, expiration)
 
 
 def get_historical(symbol: str, months: int = 6) -> pd.DataFrame:
@@ -358,30 +379,13 @@ def get_historical(symbol: str, months: int = 6) -> pd.DataFrame:
         df = df[["Open", "High", "Low", "Close", "Volume"]].copy()
         df.sort_index(inplace=True)
         return df
-    except Exception as e:
+    except BaseException as e:
+        if _is_oauth_error(e):
+            _client = None
         logger.warning("Schwab historical failed (%s), falling back to yfinance", e)
         from data.provider import get_historical as yf_historical
         return yf_historical(symbol, months)
 
 
-def days_to_expiration(expiration: str) -> int:
-    """Return calendar days from today to expiration."""
-    exp = date.fromisoformat(expiration)
-    return max(0, (exp - date.today()).days)
 
-
-def earnings_warning(quote: Quote, expiration: str) -> Optional[str]:
-    """Return a warning if earnings falls before expiration."""
-    if not quote.earnings_date:
-        return None
-    try:
-        ed = date.fromisoformat(quote.earnings_date)
-        exp = date.fromisoformat(expiration)
-        if ed <= exp:
-            return (
-                f"Earnings expected on {quote.earnings_date} — before expiration. "
-                "IV crush risk is elevated."
-            )
-    except Exception:
-        pass
-    return None
+# days_to_expiration and earnings_warning are imported from data.common

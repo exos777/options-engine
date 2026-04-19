@@ -16,7 +16,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 # Force-reload all project modules to bust Streamlit Cloud's stale module cache.
 # Without this, cached .pyc from a prior deploy can shadow the current source.
-_PROJECT_PREFIXES = ("scoring.", "indicators.", "data.", "ui.", "strategies.", "config")
+_PROJECT_PREFIXES = ("scoring.", "indicators.", "data.", "ui.", "strategies.", "greeks.", "config")
 for _mod_name in list(sys.modules):
     if any(_mod_name == p or _mod_name.startswith(p) for p in _PROJECT_PREFIXES):
         importlib.reload(sys.modules[_mod_name])
@@ -25,15 +25,6 @@ import streamlit as st
 
 from config import schwab_available
 from data import provider as _yf_provider
-
-# Choose data provider based on sidebar toggle (default to Schwab if available)
-if "data_source" not in st.session_state:
-    st.session_state["data_source"] = "Schwab" if schwab_available() else "Yahoo Finance"
-
-if st.session_state["data_source"] == "Schwab" and schwab_available():
-    from data import schwab_provider as dp
-else:
-    dp = _yf_provider
 from indicators.technical import calculate_full_indicators
 from indicators.support_resistance import find_support_resistance
 from scoring.regime import classify_regime
@@ -56,9 +47,26 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
+# ---------------------------------------------------------------------------
+# Session state defaults (prevents KeyError crashes)
+# ---------------------------------------------------------------------------
+_SESSION_DEFAULTS = {
+    "result": None,
+    "hist_df": None,
+    "full_ind": None,
+    "expected_move": 0.0,
+    "expirations": [],
+    "default_exp": "",
+    "last_ticker": "",
+    "ticker_history": ["TSLA", "MSFT", "NVDA"],
+    "auto_run": False,
+}
+for _k, _v in _SESSION_DEFAULTS.items():
+    if _k not in st.session_state:
+        st.session_state[_k] = _v
+
 st.title("📈 Weekly Options Screener")
-_source = st.session_state.get("data_source", "Yahoo Finance")
-st.caption(f"Covered Calls & Cash-Secured Puts — powered by {_source}")
+st.caption("Covered Calls & Cash-Secured Puts")
 
 st.markdown("""
 <style>
@@ -95,11 +103,59 @@ with st.sidebar:
 
     # Data source selector
     _schwab_ok = schwab_available()
-    _sources = ["Schwab", "Yahoo Finance"] if _schwab_ok else ["Yahoo Finance"]
-    _current = st.session_state.get("data_source", _sources[0])
-    _idx = _sources.index(_current) if _current in _sources else 0
-    data_source = st.radio("Data Source", _sources, index=_idx, horizontal=True)
+    _source_options = [
+        "Auto (Schwab → yfinance fallback)",
+        "Schwab Only",
+        "Yahoo Finance Only",
+    ]
+    _default_source = st.session_state.get("data_source", _source_options[0])
+    _idx = _source_options.index(_default_source) if _default_source in _source_options else 0
+    data_source = st.sidebar.radio("Data Source", options=_source_options, index=_idx)
 
+    if not _schwab_ok and data_source in (_source_options[0], _source_options[1]):
+        st.warning(
+            "Schwab credentials not found. Check `.env` or Streamlit secrets. "
+            "Falling back to Yahoo Finance.",
+            icon="⚠️",
+        )
+
+    # Token expiry warning for Schwab users
+    if _schwab_ok and data_source != "Yahoo Finance Only":
+        try:
+            import json as _json
+            from pathlib import Path as _Path
+            from datetime import datetime as _dt
+            _tok_path = _Path(__file__).resolve().parent.parent / "schwab_token.json"
+            _tok_data = None
+            if _tok_path.exists():
+                _tok_data = _json.loads(_tok_path.read_text())
+            else:
+                _tok_secret = st.secrets.get("SCHWAB_TOKEN_JSON", "")
+                if _tok_secret:
+                    if isinstance(_tok_secret, str):
+                        _clean = _tok_secret.replace("\n", "").replace("\r", "")
+                        _tok_data = _json.loads(_clean)
+                    else:
+                        _tok_data = dict(_tok_secret)
+            if _tok_data:
+                _created = _tok_data.get("creation_timestamp", 0)
+                if _created > 0:
+                    _age_days = (_dt.now().timestamp() - _created) / 86400
+                    _remaining = max(0, 7 - _age_days)
+                    if _remaining < 1:
+                        st.error(
+                            "Schwab token expired or expiring today. "
+                            "Run `schwab_auth.py` to refresh.",
+                            icon="🔐",
+                        )
+                    elif _remaining < 2:
+                        st.warning(
+                            f"Schwab token expires in ~{_remaining:.0f} day. "
+                            "Run `schwab_auth.py` soon to avoid disruption.",
+                            icon="⚠️",
+                        )
+        except Exception:
+            pass
 
     if data_source != st.session_state.get("data_source"):
         st.session_state["data_source"] = data_source
@@ -260,6 +316,20 @@ with st.sidebar:
     )
 
 
+
+# ---------------------------------------------------------------------------
+# Resolve data provider based on sidebar selection
+# ---------------------------------------------------------------------------
+_use_schwab = (
+    _schwab_ok
+    and data_source in ("Auto (Schwab → yfinance fallback)", "Schwab Only")
+)
+if _use_schwab:
+    from data import schwab_provider as dp
+    _source_label = "📡 Schwab" if data_source == "Schwab Only" else "📡 Schwab → yfinance"
+else:
+    dp = _yf_provider
+    _source_label = "📊 Yahoo Finance"
 
 # ---------------------------------------------------------------------------
 # Build FilterParams from sidebar inputs
@@ -502,8 +572,9 @@ rec_ui.render_option_table(result)
 
 # Footer
 st.divider()
+_footer_source = "Schwab (real-time)" if _use_schwab else "Yahoo Finance (15-min delayed)"
 st.caption(
-    "Data provided by Yahoo Finance (15-min delayed). "
+    f"Data provided by {_footer_source}. "
     "This tool is for educational and informational purposes only. "
     "Not financial advice."
 )

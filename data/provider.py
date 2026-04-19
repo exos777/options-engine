@@ -50,6 +50,13 @@ import yfinance as yf
 
 from greeks.black_scholes import backfill_greeks
 from strategies.models import OptionContract, Quote
+from data.common import (
+    safe_float as _safe_float,
+    safe_int as _safe_int,
+    nearest_weekly_expiration as _nearest_weekly_expiration,
+    days_to_expiration,
+    earnings_warning,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -59,41 +66,6 @@ logger = logging.getLogger(__name__)
 
 def _ticker(symbol: str) -> yf.Ticker:
     return yf.Ticker(symbol.upper().strip())
-
-
-def _nearest_weekly_expiration(expirations: tuple[str, ...]) -> str:
-    """
-    Return the nearest expiration that falls on a Friday (weekly option)
-    or, if none found within 14 days, the nearest expiration overall.
-    """
-    today = date.today()
-    candidates = []
-    for exp_str in expirations:
-        exp = date.fromisoformat(exp_str)
-        if exp >= today:
-            candidates.append(exp)
-    if not candidates:
-        raise ValueError("No future expirations found.")
-    # Prefer Friday expirations (weekday() == 4) within the next ~14 days
-    friday_candidates = [e for e in candidates if e.weekday() == 4]
-    if friday_candidates:
-        return friday_candidates[0].isoformat()
-    # Fallback: nearest expiration regardless of day
-    return sorted(candidates)[0].isoformat()
-
-
-def _safe_float(val, default: float = 0.0) -> float:
-    try:
-        return float(val) if val is not None and not pd.isna(val) else default
-    except (TypeError, ValueError):
-        return default
-
-
-def _safe_int(val, default: int = 0) -> int:
-    try:
-        return int(val) if val is not None and not pd.isna(val) else default
-    except (TypeError, ValueError):
-        return default
 
 
 # ---------------------------------------------------------------------------
@@ -245,27 +217,5 @@ def get_historical(symbol: str, months: int = 6) -> pd.DataFrame:
     return df
 
 
-def days_to_expiration(expiration: str) -> int:
-    """Return calendar days from today to *expiration*."""
-    exp = date.fromisoformat(expiration)
-    return max(0, (exp - date.today()).days)
 
-
-def earnings_warning(quote: Quote, expiration: str) -> Optional[str]:
-    """
-    Return a warning string if an earnings date falls before or on the expiration,
-    otherwise return None.
-    """
-    if not quote.earnings_date:
-        return None
-    try:
-        ed = date.fromisoformat(quote.earnings_date)
-        exp = date.fromisoformat(expiration)
-        if ed <= exp:
-            return (
-                f"Earnings expected on {quote.earnings_date} — before expiration. "
-                "IV crush risk is elevated."
-            )
-    except Exception:
-        pass
-    return None
+# days_to_expiration and earnings_warning are imported from data.common

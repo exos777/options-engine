@@ -21,7 +21,6 @@ IV rank defaults to 50 (neutral) when 52-week IV data is unavailable.
 from __future__ import annotations
 
 import math
-from datetime import date
 from typing import Optional
 
 from strategies.models import (
@@ -35,6 +34,14 @@ from strategies.models import (
     TechnicalIndicators,
 )
 from scoring.regime import chart_score_multiplier
+from scoring.common import (
+    MAX_DELTA_DEFAULT,
+    apply_risk_penalties,
+    delta_score as _delta_score,
+    liquidity_score as _liquidity_score,
+    premium_score as _premium_score,
+    theta_score as _theta_score,
+)
 from indicators.support_resistance import is_near_level
 
 
@@ -74,55 +81,6 @@ _WEIGHTS: dict[RiskProfile, dict[str, float]] = {
         "buy_price": 0.07,
     },
 }
-
-_MAX_DELTA_DEFAULT: dict[RiskProfile, float] = {
-    RiskProfile.CONSERVATIVE: 0.30,
-    RiskProfile.BALANCED:     0.40,
-    RiskProfile.AGGRESSIVE:   0.50,
-}
-
-
-# ---------------------------------------------------------------------------
-# Sub-scorers (all return 0–100)
-# ---------------------------------------------------------------------------
-
-def _premium_score(annualised_return: float, risk_profile: RiskProfile) -> float:
-    """
-    Map annualised return → score using an S-curve (logistic).
-
-    Targets represent "excellent" premium for weekly sellers:
-      Conservative ~25% APY, Balanced ~40%, Aggressive ~60%+
-    The curve midpoint is at 50% of target (score=50), giving good
-    differentiation in the 15–60% APY range where weeklies operate.
-    """
-    targets = {
-        RiskProfile.CONSERVATIVE: 0.25,
-        RiskProfile.BALANCED:     0.40,
-        RiskProfile.AGGRESSIVE:   0.60,
-    }
-    target = targets[risk_profile]
-    k = 8.0
-    score = 100.0 / (1.0 + math.exp(-k * (annualised_return / target - 0.5)))
-    return min(100.0, max(0.0, score))
-
-
-def _delta_score(delta: Optional[float], max_delta: float) -> float:
-    """
-    Low absolute delta = high score for puts (we want OTM).
-    delta here is the put delta, typically negative; we use abs().
-    """
-    if delta is None:
-        return 50.0
-    d = abs(delta)
-    if d > max_delta:
-        return max(0.0, 20.0 - (d - max_delta) * 200)
-    return 30.0 + (max_delta - d) / max_delta * 70.0
-
-
-def _liquidity_score(oi: int, spread_pct: float) -> float:
-    oi_score = min(100.0, math.log1p(max(0, oi)) / math.log1p(500) * 100)
-    spread_score = max(0.0, 100.0 - spread_pct * 333)
-    return (oi_score + spread_score) / 2
 
 
 def _chart_score(
@@ -165,54 +123,6 @@ def _chart_score(
             raw = max(0.0, raw - 10)
 
     return raw * multiplier
-
-
-def _theta_score(
-    theta: Optional[float],
-    risk_profile: RiskProfile,
-    current_price: float = 100.0,
-) -> float:
-    """
-    Higher absolute theta = more daily decay income = better for sellers.
-    theta is negative for sold options; we score on abs(theta).
-
-    Targets are price-relative (basis points per day) so the curve
-    differentiates meaningfully across stock price ranges.
-    """
-    if theta is None:
-        return 50.0
-    # Theta as basis points of stock price per day
-    theta_bps = abs(theta) / current_price * 10000 if current_price > 0 else 0
-    # Targets in bps/day (calibrated for weekly OTM options)
-    targets = {
-        RiskProfile.CONSERVATIVE: 3.0,   # e.g. $0.06/day on $200 stock
-        RiskProfile.BALANCED:     5.0,   # e.g. $0.10/day on $200 stock
-        RiskProfile.AGGRESSIVE:   8.0,   # e.g. $0.16/day on $200 stock
-    }
-    target = targets[risk_profile]
-    k = 2.0
-    score = 100 * (1 - math.exp(-k * theta_bps / target))
-    return min(100.0, max(0.0, score))
-
-
-def _vega_penalty(vega: Optional[float], risk_profile: RiskProfile) -> float:
-    """
-    Return a composite multiplier (0.60–1.0).
-    High vega = risk of IV expansion hurting the short position.
-    """
-    if vega is None:
-        return 1.0
-    thresholds = {
-        RiskProfile.CONSERVATIVE: 0.15,
-        RiskProfile.BALANCED:     0.25,
-        RiskProfile.AGGRESSIVE:   0.35,
-    }
-    threshold = thresholds[risk_profile]
-    abs_vega = abs(vega)
-    if abs_vega <= threshold:
-        return 1.0
-    excess = abs_vega - threshold
-    return max(0.60, 1.0 - excess * 2.0)
 
 
 def _iv_rank_score(current_iv: float, iv_52w_high: float, iv_52w_low: float) -> float:
@@ -350,7 +260,7 @@ def score_cash_secured_puts(
         total = sum(weights.values())
         for k in weights:
             weights[k] += bp_w * (weights[k] / total)
-    max_delta = params.max_delta or _MAX_DELTA_DEFAULT[params.risk_profile]
+    max_delta = params.max_delta or MAX_DELTA_DEFAULT[params.risk_profile]
     scored: list[ScoredOption] = []
 
     for c in puts:
@@ -409,36 +319,9 @@ def score_cash_secured_puts(
             composite += weights["buy_price"] * bps
 
         # --- Capped risk modifiers (prevent excessive stacking) ---
-        penalty = 1.0
-
-        # Regime penalty
-        if regime.trade_bias == "skip":
-            penalty *= 0.35
-        elif regime.trade_bias == "caution":
-            penalty *= 0.75
-
-        # Earnings penalty (binary event risk)
-        earnings_in_window = False
-        if earnings_date:
-            try:
-                ed = date.fromisoformat(earnings_date)
-                exp = date.fromisoformat(c.expiration)
-                if ed <= exp:
-                    earnings_in_window = True
-                    penalty *= 0.65
-            except Exception:
-                pass
-
-        # Vega risk penalty
-        penalty *= _vega_penalty(c.vega, params.risk_profile)
-
-        # Floor: never reduce by more than 55% (except "skip" regime
-        # which is an explicit do-not-trade signal)
-        if regime.trade_bias != "skip":
-            penalty = max(0.45, penalty)
-
-        composite *= penalty
-        composite = min(100.0, composite)
+        composite, earnings_in_window = apply_risk_penalties(
+            composite, c, regime, params.risk_profile, earnings_date,
+        )
 
         near_sup = any(is_near_level(c.strike, s) for s in support_levels)
         near_res = any(is_near_level(c.strike, r) for r in resistance_levels)

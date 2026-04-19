@@ -20,19 +20,20 @@ import schwab
 
 APP_KEY = os.getenv("SCHWAB_APP_KEY", "")
 APP_SECRET = os.getenv("SCHWAB_APP_SECRET", "")
-CALLBACK_URL = "https://127.0.0.1"
+CALLBACK_URL = "https://127.0.0.1:8182"
 TOKEN_PATH = str(Path(__file__).parent / "schwab_token.json")
 
 if not APP_KEY or APP_KEY in ("your_key_here", "your_app_key_here"):
     print("ERROR: SCHWAB_APP_KEY not set. Add it to .env first.")
     raise SystemExit(1)
 
-c = schwab.auth.easy_client(
-    api_key=APP_KEY,
-    app_secret=APP_SECRET,
-    callback_url=CALLBACK_URL,
-    token_path=TOKEN_PATH,
-)
+if __name__ == "__main__":
+    c = schwab.auth.easy_client(
+        api_key=APP_KEY,
+        app_secret=APP_SECRET,
+        callback_url=CALLBACK_URL,
+        token_path=TOKEN_PATH,
+    )
 
-print("Authentication successful!")
-print(f"Token saved to {TOKEN_PATH}")
+    print("Authentication successful!")
+    print(f"Token saved to {TOKEN_PATH}")

@@ -1,8 +1,12 @@
 [phases.setup]
 nixPkgs = ["python311", "gcc"]
+onlyIncludeFiles = ["requirements.txt", "app", "scoring", "indicators", "data", "ui", "config.py"]
 
 [phases.install]
 cmds = ["pip install -r requirements.txt"]
 
 [start]
 cmd = "python -m streamlit run app/main.py --server.port $PORT --server.address 0.0.0.0 --server.headless true"
+
+[variables]
+NIXPACKS_PYTHON_VERSION = "3.11"

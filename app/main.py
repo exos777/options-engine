@@ -114,7 +114,7 @@ with st.sidebar:
 
     if not _schwab_ok and data_source in (_source_options[0], _source_options[1]):
         st.warning(
-            "Schwab credentials not found. Check `.env` or Streamlit secrets. "
+            "Schwab credentials not found. Check Railway environment variables or `.env`. "
             "Falling back to Yahoo Finance.",
             icon="⚠️",
         )
@@ -130,13 +130,9 @@ with st.sidebar:
             if _tok_path.exists():
                 _tok_data = _json.loads(_tok_path.read_text())
             else:
-                _tok_secret = st.secrets.get("SCHWAB_TOKEN_JSON", "")
-                if _tok_secret:
-                    if isinstance(_tok_secret, str):
-                        _clean = _tok_secret.replace("\n", "").replace("\r", "")
-                        _tok_data = _json.loads(_clean)
-                    else:
-                        _tok_data = dict(_tok_secret)
+                _tok_env = os.environ.get("SCHWAB_TOKEN_JSON", "").strip()
+                if _tok_env:
+                    _tok_data = _json.loads(_tok_env)
             if _tok_data:
                 _created = _tok_data.get("creation_timestamp", 0)
                 if _created > 0:

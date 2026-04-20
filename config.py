@@ -1,7 +1,7 @@
 """
 Configuration and secrets loader.
 
-Reads from .env (local dev) via python-dotenv, then Streamlit secrets.
+Reads from environment variables (Railway) or .env (local dev).
 Keys are exposed as module-level constants — import what you need:
 
     from config import SCHWAB_APP_KEY, SCHWAB_APP_SECRET
@@ -17,14 +17,6 @@ try:
     load_dotenv(Path(__file__).parent / ".env")
 except ImportError:
     pass  # python-dotenv not installed; fall back to real env vars
-
-# Try Streamlit secrets as fallback
-try:
-    import streamlit as st
-    os.environ.setdefault("SCHWAB_APP_KEY", st.secrets.get("SCHWAB_APP_KEY", ""))
-    os.environ.setdefault("SCHWAB_APP_SECRET", st.secrets.get("SCHWAB_APP_SECRET", ""))
-except Exception:
-    pass
 
 SCHWAB_APP_KEY: str    = os.getenv("SCHWAB_APP_KEY", "")
 SCHWAB_APP_SECRET: str = os.getenv("SCHWAB_APP_SECRET", "")

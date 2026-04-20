@@ -4,7 +4,7 @@ Schwab data provider — real-time quotes and option chains via schwab-py.
 Mirrors the public API of data/provider.py so callers can swap seamlessly.
 Authentication:
   - Local: uses schwab_token.json (created via browser OAuth on first run)
-  - Streamlit Cloud: reads token JSON from st.secrets["SCHWAB_TOKEN_JSON"]
+  - Railway/Cloud: reads token JSON from SCHWAB_TOKEN_JSON env var
 """
 
 from __future__ import annotations
@@ -30,20 +30,11 @@ _client = None
 def _get_credentials() -> tuple[str, str, str]:
     """Resolve Schwab app key, secret, and token JSON.
 
-    Priority: Railway/system env vars → Streamlit secrets → .env file.
+    Priority: environment variables → .env file.
     """
     app_key = os.environ.get("SCHWAB_APP_KEY")
     app_secret = os.environ.get("SCHWAB_APP_SECRET")
     token_json = os.environ.get("SCHWAB_TOKEN_JSON")
-
-    if not app_key:
-        try:
-            import streamlit as st
-            app_key = st.secrets.get("SCHWAB_APP_KEY")
-            app_secret = st.secrets.get("SCHWAB_APP_SECRET")
-            token_json = token_json or st.secrets.get("SCHWAB_TOKEN_JSON")
-        except Exception:
-            pass
 
     if not app_key:
         try:
@@ -84,15 +75,15 @@ def _validate_client(client) -> None:
 
 
 def _handle_auth_failure(e: Exception) -> None:
-    """Show user-friendly error on Streamlit Cloud for auth failures, then stop."""
+    """Show user-friendly error for auth failures, then stop."""
     global _client
-    _client = None  # clear cached broken client
+    _client = None
     try:
         import streamlit as st
         st.error(
             "**Schwab refresh token expired.** "
             "Run `schwab_auth.py` locally to generate a new token, "
-            "then update `SCHWAB_TOKEN_JSON` in Streamlit secrets. "
+            "then update the `SCHWAB_TOKEN_JSON` environment variable on Railway. "
             "(Schwab tokens expire every 7 days.)\n\n"
             f"Error: {e}"
         )
@@ -113,7 +104,7 @@ def get_client():
     if not app_key or app_key in ("your_key_here", "your_app_key_here"):
         raise RuntimeError(
             "SCHWAB_APP_KEY not configured. "
-            "Set it in .env, environment variables, or Streamlit secrets."
+            "Set it in environment variables or .env file."
         )
 
     token_path = _token_path()
@@ -137,14 +128,10 @@ def get_client():
         if token_json:
             import tempfile
             tmp_token = Path(tempfile.gettempdir()) / "schwab_token.json"
-            # Normalize: TOML may add whitespace/newlines or parse to dict
-            import json
-            if isinstance(token_json, str):
-                # Strip control characters that TOML multi-line strings introduce
-                clean = token_json.replace("\n", "").replace("\r", "").replace("\t", "")
-                token_data = json.loads(clean)
-            else:
-                token_data = token_json
+            clean = token_json.strip()
+            if not clean:
+                raise ValueError("SCHWAB_TOKEN_JSON is set but empty")
+            token_data = json.loads(clean)
             tmp_token.write_text(json.dumps(token_data))
             logger.info("Schwab: wrote token to %s (%d bytes)", tmp_token, tmp_token.stat().st_size)
             candidate = schwab.auth.client_from_token_file(
@@ -152,18 +139,18 @@ def get_client():
             )
             _validate_client(candidate)
             _client = candidate
-            logger.info("Schwab: authenticated from Streamlit secrets token")
+            logger.info("Schwab: authenticated from SCHWAB_TOKEN_JSON env var")
             return _client
         elif _on_cloud:
-            import streamlit as st
-            st.error("SCHWAB_TOKEN_JSON not found in Streamlit secrets. "
-                     "Run schwab_auth.py locally and paste the token JSON into secrets.")
-            st.stop()
+            raise RuntimeError(
+                "SCHWAB_TOKEN_JSON not found in environment variables. "
+                "Run schwab_auth.py locally and set the token JSON in Railway env vars."
+            )
     except Exception as e:
-        logger.error("Schwab token from secrets failed: %s", e, exc_info=True)
+        logger.error("Schwab token from env failed: %s", e, exc_info=True)
         if _on_cloud:
             _handle_auth_failure(e)
-        logger.warning("Schwab: failed to auth from st.secrets token: %s", e)
+        logger.warning("Schwab: failed to auth from env token: %s", e)
 
     # 3. Fall back to browser-based login flow (local dev only)
     callback_url = "https://127.0.0.1:8182"

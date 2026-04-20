@@ -32,28 +32,9 @@ SCHWAB_APP_SECRET: str = os.getenv("SCHWAB_APP_SECRET", "")
 
 def schwab_available() -> bool:
     """Return True if Schwab credentials are configured and a token exists."""
-    # Resolve app key: module-level var, env, or st.secrets
-    app_key = SCHWAB_APP_KEY
-    if not app_key or app_key in ("your_key_here", "your_app_key_here"):
-        app_key = os.getenv("SCHWAB_APP_KEY", "")
-    if not app_key or app_key in ("your_key_here", "your_app_key_here"):
-        try:
-            import streamlit as st
-            app_key = st.secrets.get("SCHWAB_APP_KEY", "")
-        except Exception:
-            pass
+    from data.schwab_provider import _get_credentials
+    app_key, app_secret, token_json = _get_credentials()
     if not app_key or app_key in ("your_key_here", "your_app_key_here"):
         return False
-
-    # Local: check for token file on disk
     token_path = Path(__file__).parent / "schwab_token.json"
-    if token_path.exists():
-        return True
-    # Streamlit Cloud: check for token in secrets
-    try:
-        import streamlit as st
-        if st.secrets.get("SCHWAB_TOKEN_JSON", ""):
-            return True
-    except Exception:
-        pass
-    return False
+    return bool(token_json or token_path.exists())

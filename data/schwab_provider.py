@@ -27,30 +27,40 @@ logger = logging.getLogger(__name__)
 _client = None
 
 
-def _get_keys() -> tuple[str, str]:
-    """Resolve Schwab API key + secret from env, .env, or st.secrets."""
-    app_key = os.getenv("SCHWAB_APP_KEY", "")
-    app_secret = os.getenv("SCHWAB_APP_SECRET", "")
+def _get_credentials() -> tuple[str, str, str]:
+    """Resolve Schwab app key, secret, and token JSON.
 
-    # Try Streamlit secrets if env vars are empty/placeholder
-    if not app_key or app_key in ("your_key_here", "your_app_key_here"):
+    Priority: Railway/system env vars → Streamlit secrets → .env file.
+    """
+    app_key = os.environ.get("SCHWAB_APP_KEY")
+    app_secret = os.environ.get("SCHWAB_APP_SECRET")
+    token_json = os.environ.get("SCHWAB_TOKEN_JSON")
+
+    if not app_key:
         try:
             import streamlit as st
-            app_key = st.secrets.get("SCHWAB_APP_KEY", "")
-            app_secret = st.secrets.get("SCHWAB_APP_SECRET", "")
+            app_key = st.secrets.get("SCHWAB_APP_KEY")
+            app_secret = st.secrets.get("SCHWAB_APP_SECRET")
+            token_json = token_json or st.secrets.get("SCHWAB_TOKEN_JSON")
         except Exception:
             pass
 
-    # Try dotenv as last resort
-    if not app_key or app_key in ("your_key_here", "your_app_key_here"):
+    if not app_key:
         try:
             from dotenv import load_dotenv
             load_dotenv(Path(__file__).resolve().parent.parent / ".env")
-            app_key = os.getenv("SCHWAB_APP_KEY", "")
-            app_secret = os.getenv("SCHWAB_APP_SECRET", "")
+            app_key = os.environ.get("SCHWAB_APP_KEY")
+            app_secret = os.environ.get("SCHWAB_APP_SECRET")
+            token_json = token_json or os.environ.get("SCHWAB_TOKEN_JSON")
         except ImportError:
             pass
 
+    return app_key or "", app_secret or "", token_json or ""
+
+
+def _get_keys() -> tuple[str, str]:
+    """Resolve Schwab API key + secret (legacy wrapper)."""
+    app_key, app_secret, _ = _get_credentials()
     return app_key, app_secret
 
 
@@ -99,7 +109,7 @@ def get_client():
 
     import schwab
 
-    app_key, app_secret = _get_keys()
+    app_key, app_secret, token_json = _get_credentials()
     if not app_key or app_key in ("your_key_here", "your_app_key_here"):
         raise RuntimeError(
             "SCHWAB_APP_KEY not configured. "
@@ -121,11 +131,9 @@ def get_client():
         except Exception as e:
             logger.warning("Schwab: token file auth failed (%s), will try other methods", e)
 
-    # 2. Try loading token JSON from Streamlit secrets (Cloud deployment)
-    _on_cloud = not token_path.exists()  # no local token file = likely Cloud
+    # 2. Try loading token JSON from env var (Railway) or Streamlit secrets
+    _on_cloud = not token_path.exists()
     try:
-        import streamlit as st
-        token_json = st.secrets.get("SCHWAB_TOKEN_JSON", "")
         if token_json:
             import tempfile
             tmp_token = Path(tempfile.gettempdir()) / "schwab_token.json"

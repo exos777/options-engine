@@ -167,19 +167,16 @@ def render_market_overview(
 
 
 # ---------------------------------------------------------------------------
-# Direction gauge
+# Shared directional probability calculation
 # ---------------------------------------------------------------------------
 
-def render_direction_gauge(
+def _calculate_direction_probability(
     result: ScreenerResult,
     indicators,
     full_ind: FullIndicators | None,
-) -> None:
-    """Compact BEAR/BULL direction gauge with probability bar."""
+) -> dict:
+    """Single source of truth for directional probability."""
     price = result.quote.price
-    dte = result.dte
-    ticker = result.quote.ticker
-
     rsi = indicators.rsi_14
     sma20 = indicators.sma_20
     sma50 = indicators.sma_50
@@ -283,20 +280,67 @@ def render_direction_gauge(
 
     total = sum(adj.values())
     bull_prob = max(15.0, min(85.0, 50.0 + total))
+    bear_prob = 100.0 - bull_prob
 
     if bull_prob > 50:
         display_pct = bull_prob
         display_label = "Bullish"
-        emoji = "🟢"
-        color = "#3fb950"
     elif bull_prob < 50:
-        display_pct = 100 - bull_prob
+        display_pct = bear_prob
         display_label = "Bearish"
-        emoji = "🔴"
-        color = "#f85149"
     else:
         display_pct = 50.0
         display_label = "Neutral"
+
+    bull_count = sum(1 for v in adj.values() if v > 0)
+    bear_count = sum(1 for v in adj.values() if v < 0)
+    majority = max(bull_count, bear_count)
+    agreement = majority / len(adj) if adj else 0
+
+    if agreement >= 0.77:
+        confidence = "High Confidence"
+    elif agreement >= 0.55:
+        confidence = "Moderate Confidence"
+    else:
+        confidence = "Low Confidence"
+
+    return {
+        "bull_prob": bull_prob,
+        "bear_prob": bear_prob,
+        "display_pct": display_pct,
+        "display_label": display_label,
+        "bull_count": bull_count,
+        "bear_count": bear_count,
+        "confidence": confidence,
+        "adjustments": adj,
+        "total_adj": total,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Direction gauge
+# ---------------------------------------------------------------------------
+
+def render_direction_gauge(
+    result: ScreenerResult,
+    indicators,
+    full_ind: FullIndicators | None,
+) -> None:
+    """Compact BEAR/BULL direction gauge with probability bar."""
+    prob = _calculate_direction_probability(result, indicators, full_ind)
+    bull_prob = prob["bull_prob"]
+    display_pct = prob["display_pct"]
+    display_label = prob["display_label"]
+    ticker = result.quote.ticker
+    dte = result.dte
+
+    if display_label == "Bullish":
+        emoji = "🟢"
+        color = "#3fb950"
+    elif display_label == "Bearish":
+        emoji = "🔴"
+        color = "#f85149"
+    else:
         emoji = "🟡"
         color = "#d29922"
 
@@ -371,17 +415,25 @@ def render_price_forecast(
 ) -> None:
     """
     Render a comprehensive probability-based price forecast using all 9
-    indicator signals.  Replaces the old warning banner with an actionable
-    bullish/bearish probability, confidence level, and indicator breakdown.
+    indicator signals.  Uses the shared probability calculation so gauge
+    and forecast always agree.
     """
+    prob = _calculate_direction_probability(result, result.indicators, full_ind)
+    adjustments = prob["adjustments"]
+    total_adj = prob["total_adj"]
+    bullish_prob = prob["bull_prob"]
+    bearish_prob = prob["bear_prob"]
+    display_pct = prob["display_pct"]
+    display_label = prob["display_label"]
+
     price = result.quote.price
     dte = result.dte
     expected_move = result.expected_move
     upper = price + expected_move
     lower = price - expected_move
     indicators = result.indicators
+    regime = result.regime.primary
 
-    # ── Gather all indicator values ──────────────────
     rsi = indicators.rsi_14
     sma20 = indicators.sma_20
     sma50 = indicators.sma_50
@@ -389,139 +441,40 @@ def render_price_forecast(
     vwap = getattr(indicators, "vwap", 0) or 0
     squeeze_on = getattr(indicators, "squeeze_on", False)
 
-    # MACD values from full_ind
     macd_line = 0.0
     hist_rising = False
-    last_hist = 0.0
     if full_ind is not None and hasattr(full_ind, "macd_data"):
         macd_line = float(full_ind.macd_data.macd_line.iloc[-1])
         last_hist = float(full_ind.macd_data.histogram.iloc[-1])
         prev_hist = float(full_ind.macd_data.histogram.iloc[-2])
         hist_rising = last_hist > prev_hist
 
-    # BB pct_b
-    pct_b = 0.5  # neutral default
+    pct_b = 0.5
     if full_ind is not None and hasattr(full_ind, "bb"):
         pb = full_ind.bb.pct_b.iloc[-1]
         if not pd.isna(pb):
             pct_b = float(pb)
 
-    regime = result.regime.primary
-
-    # ── Calculate adjustments ────────────────────────
-    adjustments: dict[str, int] = {}
-
-    # 1. RSI
-    if rsi < 30:        adjustments["RSI"] = +15
-    elif rsi < 35:      adjustments["RSI"] = +10
-    elif rsi < 40:      adjustments["RSI"] = +5
-    elif rsi <= 60:     adjustments["RSI"] = 0
-    elif rsi < 65:      adjustments["RSI"] = -5
-    elif rsi < 70:      adjustments["RSI"] = -10
-    else:               adjustments["RSI"] = -15
-
-    # 2. MACD
-    if macd_line > 0 and hist_rising:       adjustments["MACD"] = +12
-    elif macd_line > 0 and not hist_rising:  adjustments["MACD"] = +6
-    elif macd_line < 0 and hist_rising:     adjustments["MACD"] = -3
-    else:                                   adjustments["MACD"] = -12
-
-    # 3. SMA20
     pct_from_sma20 = (price - sma20) / sma20 * 100
-    if pct_from_sma20 > 3:      adjustments["SMA20"] = +10
-    elif pct_from_sma20 > 1:    adjustments["SMA20"] = +6
-    elif pct_from_sma20 > 0:    adjustments["SMA20"] = +3
-    elif pct_from_sma20 > -1:   adjustments["SMA20"] = -3
-    elif pct_from_sma20 > -3:   adjustments["SMA20"] = -6
-    else:                       adjustments["SMA20"] = -10
-
-    # 4. SMA50
     pct_from_sma50 = (price - sma50) / sma50 * 100
-    if pct_from_sma50 > 3:      adjustments["SMA50"] = +10
-    elif pct_from_sma50 > 1:    adjustments["SMA50"] = +6
-    elif pct_from_sma50 > 0:    adjustments["SMA50"] = +3
-    elif pct_from_sma50 > -1:   adjustments["SMA50"] = -3
-    elif pct_from_sma50 > -3:   adjustments["SMA50"] = -6
-    else:                       adjustments["SMA50"] = -10
 
-    # 5. Bollinger Bands
-    if pct_b < 0:           adjustments["BB"] = +10
-    elif pct_b < 0.2:       adjustments["BB"] = +7
-    elif pct_b < 0.4:       adjustments["BB"] = +3
-    elif pct_b <= 0.6:      adjustments["BB"] = 0
-    elif pct_b < 0.8:       adjustments["BB"] = -3
-    elif pct_b <= 1.0:      adjustments["BB"] = -7
-    else:                   adjustments["BB"] = -10
-
-    # 6. ADX (trend strength × direction from regime)
-    if adx < 20:
-        adjustments["ADX"] = 0
-    elif regime == ChartRegime.BEARISH:
-        adjustments["ADX"] = -8 if adx > 30 else -4
-    elif regime == ChartRegime.BULLISH:
-        adjustments["ADX"] = +8 if adx > 30 else +4
-    else:
-        adjustments["ADX"] = 0
-
-    # 7. VWAP
-    if vwap > 0:
-        pct_from_vwap = (price - vwap) / vwap * 100
-        if pct_from_vwap > 2:       adjustments["VWAP"] = +8
-        elif pct_from_vwap > 0:     adjustments["VWAP"] = +4
-        elif pct_from_vwap > -2:    adjustments["VWAP"] = -4
-        else:                       adjustments["VWAP"] = -8
-    else:
-        adjustments["VWAP"] = 0
-
-    # 8. TTM Squeeze
-    if squeeze_on:
-        if regime == ChartRegime.BULLISH:     adjustments["Squeeze"] = +3
-        elif regime == ChartRegime.BEARISH:   adjustments["Squeeze"] = -3
-        else:                                 adjustments["Squeeze"] = 0
-    else:
-        if last_hist > 0 and hist_rising:         adjustments["Squeeze"] = +7
-        elif last_hist > 0:                       adjustments["Squeeze"] = +3
-        elif last_hist < 0 and not hist_rising:   adjustments["Squeeze"] = -7
-        else:                                     adjustments["Squeeze"] = -3
-
-    # 9. Chart Regime
-    regime_adj = {
-        ChartRegime.BULLISH:         +10,
-        ChartRegime.NEAR_SUPPORT:    +6,
-        ChartRegime.NEUTRAL:          0,
-        ChartRegime.NEAR_RESISTANCE: -6,
-        ChartRegime.BEARISH:         -10,
-        ChartRegime.OVEREXTENDED:    -8,
-    }
-    adjustments["Regime"] = regime_adj.get(regime, 0)
-
-    # ── Votes (simple +1 / -1 / 0 per indicator) ────
     votes = {k: (1 if v > 0 else -1 if v < 0 else 0) for k, v in adjustments.items()}
     bullish_signals = sum(1 for v in votes.values() if v > 0)
     bearish_signals = sum(1 for v in votes.values() if v < 0)
     neutral_count   = sum(1 for v in votes.values() if v == 0)
 
-    # ── Final probability (weighted) ─────────────────
-    total_adj = sum(adjustments.values())
-    bullish_prob = max(15.0, min(85.0, 50.0 + total_adj))
-    bearish_prob = 100.0 - bullish_prob
-
-    direction = (
-        "BULLISH" if bullish_prob > 52
-        else "BEARISH" if bullish_prob < 48
-        else "NEUTRAL"
-    )
-    direction_emoji = "🟢" if direction == "BULLISH" else "🔴" if direction == "BEARISH" else "🟡"
-    majority_count = max(bullish_signals, bearish_signals)
-
-    # ── Bias color theme ─────────────────────────────
-    if direction == "BULLISH":
+    direction = display_label.upper()
+    if display_label == "Bullish":
+        direction_emoji = "🟢"
         bias_bg, bias_color, bias_border = "#1a4a2e", "#3fb950", "#3fb950"
-    elif direction == "BEARISH":
+    elif display_label == "Bearish":
+        direction_emoji = "🔴"
         bias_bg, bias_color, bias_border = "#4a1a1a", "#f85149", "#f85149"
     else:
+        direction_emoji = "🟡"
         bias_bg, bias_color, bias_border = "#3a3a1a", "#d29922", "#d29922"
 
+    majority_count = max(bullish_signals, bearish_signals)
     em_pct = expected_move / price * 100 if price > 0 else 0.0
 
     # ── CSP / CC detail lines ─────────────────────────
@@ -611,7 +564,7 @@ def render_price_forecast(
 
 '<div style="background:{bias_bg};border-right:1px solid #30363d;padding:14px 16px;">'
 '<div style="font-size:17px;font-weight:700;color:{bias_color};">'
-'{direction_emoji} {direction} {bullish_prob}%'
+'{direction_emoji} {direction} {display_pct}%'
 '</div>'
 '<div style="font-size:11px;color:{bias_color};opacity:0.8;margin-top:2px;">'
 '{majority_count}/9 {direction_lower} signals'
@@ -647,7 +600,7 @@ def render_price_forecast(
         bias_color=bias_color,
         direction_emoji=direction_emoji,
         direction=direction,
-        bullish_prob=f"{bullish_prob:.0f}",
+        display_pct=f"{display_pct:.0f}",
         majority_count=majority_count,
         direction_lower=direction.lower(),
         dte=dte,
@@ -670,7 +623,7 @@ def render_price_forecast(
         st.caption(
             f"{bullish_signals} bullish / {bearish_signals} bearish / "
             f"{neutral_count} neutral  ·  "
-            f"weighted score {total_adj:+.0f} → {bullish_prob:.0f}% bullish"
+            f"weighted score {total_adj:+.0f} → {display_pct:.0f}% {display_label.lower()}"
         )
 
     st.caption(

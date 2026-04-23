@@ -758,40 +758,46 @@ def _render_what_happens_next(
     c = rec.option.contract
     premium = rec.option.premium
 
+    st.markdown("---")
+    st.markdown("**\U0001f4cb What happens next:**")
+
     if strategy == Strategy.CASH_SECURED_PUT:
         effective_basis = c.strike - premium
-        target_lo = c.strike * 1.03
-        target_hi = c.strike * 1.05
-        st.markdown(
-            "<b>What happens next:</b><br><br>"
-            "\u2705 <b>If expires worthless:</b> "
-            "Keep {premium} premium. Sell another CSP next week.<br><br>"
-            "\U0001f4cc <b>If assigned at {strike}:</b> "
-            "You buy 100 shares. Effective cost basis: {basis}<br><br>"
-            "\u27a1\ufe0f <b>Immediate next step:</b> "
-            "Sell covered call above {strike} targeting "
-            "{lo}\u2013{hi} strike for 7\u201314 DTE.".format(
-                premium=f"&#36;{premium:.2f}",
-                strike=f"&#36;{c.strike:.2f}",
-                basis=f"&#36;{effective_basis:.2f}",
-                lo=f"&#36;{target_lo:.2f}",
-                hi=f"&#36;{target_hi:.2f}",
-            ),
-            unsafe_allow_html=True,
+
+        expires_text = (
+            f"\u2705 If expires worthless\n\n"
+            f"Keep ${premium:.2f} premium.\n"
+            f"Sell another CSP next week."
         )
+        assigned_text = (
+            f"\U0001f4cc If assigned at ${c.strike:.2f}\n\n"
+            f"Buy 100 shares.\n"
+            f"Cost basis: ${effective_basis:.2f}\n"
+            f"Next: Sell CC above ${c.strike:.2f}"
+        )
+
+        col1, col2 = st.columns(2)
+        with col1:
+            st.success(expires_text)
+        with col2:
+            st.warning(assigned_text)
     else:
-        st.markdown(
-            "<b>What happens next:</b><br><br>"
-            "\u2705 <b>If expires worthless:</b> "
-            "Keep {premium} premium. "
-            "Sell another CC next week.<br><br>"
-            "\U0001f4cc <b>If called away at {strike}:</b> "
-            "Position closed. Wheel complete \u2014 start new CSP cycle.".format(
-                premium=f"&#36;{premium:.2f}",
-                strike=f"&#36;{c.strike:.2f}",
-            ),
-            unsafe_allow_html=True,
+        expires_text = (
+            f"\u2705 If expires worthless\n\n"
+            f"Keep ${premium:.2f} premium.\n"
+            f"Sell another CC next week."
         )
+        called_text = (
+            f"\U0001f4cc If called away at ${c.strike:.2f}\n\n"
+            f"Position closed.\n"
+            f"Wheel complete \u2014 start new CSP."
+        )
+
+        col1, col2 = st.columns(2)
+        with col1:
+            st.success(expires_text)
+        with col2:
+            st.success(called_text)
 
 
 # ---------------------------------------------------------------------------

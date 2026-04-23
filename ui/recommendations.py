@@ -130,7 +130,7 @@ def render_market_overview(
         upper = q.price + em
         em_pct = em / q.price * 100
         row2 = (
-            '<p style="font-size:12px;color:#8b949e;margin:6px 0 4px;">'
+            '<p style="font-size:24px;color:#8b949e;margin:6px 0 4px;">'
             '<b>Expiration:</b> {exp} &nbsp;&middot;&nbsp; '
             '<b>DTE:</b> {dte} &nbsp;&middot;&nbsp; '
             '<b>Expected Move:</b> &plusmn;${em} (&plusmn;{emp}%) &nbsp;&middot;&nbsp; '

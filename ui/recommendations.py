@@ -155,12 +155,177 @@ def render_market_overview(
             icon="⚡",
         )
 
+    # ── Direction gauge ─────────────────────────────────────────────────────
+    render_direction_gauge(result, result.indicators, full_ind)
+
     # ── Earnings warning ────────────────────────────────────────────────────
     if q.earnings_date:
         from data.provider import earnings_warning
         ew = earnings_warning(q, result.expiration)
         if ew:
             st.error(ew, icon="🗓️")
+
+
+# ---------------------------------------------------------------------------
+# Direction gauge
+# ---------------------------------------------------------------------------
+
+def render_direction_gauge(
+    result: ScreenerResult,
+    indicators,
+    full_ind: FullIndicators | None,
+) -> None:
+    """Compact BEAR/BULL direction gauge with probability bar."""
+    price = result.quote.price
+    dte = result.dte
+    ticker = result.quote.ticker
+
+    rsi = indicators.rsi_14
+    sma20 = indicators.sma_20
+    sma50 = indicators.sma_50
+    adx = getattr(indicators, "adx_14", 0) or 0
+    vwap = getattr(indicators, "vwap", 0) or 0
+    squeeze_on = getattr(indicators, "squeeze_on", False)
+
+    macd_val = 0.0
+    hist_rising = False
+    last_hist = 0.0
+    if full_ind is not None and hasattr(full_ind, "macd_data"):
+        macd_val = float(full_ind.macd_data.macd_line.iloc[-1])
+        last_hist = float(full_ind.macd_data.histogram.iloc[-1])
+        prev_hist = float(full_ind.macd_data.histogram.iloc[-2])
+        hist_rising = last_hist > prev_hist
+
+    pct_b = 0.5
+    if full_ind is not None and hasattr(full_ind, "bb"):
+        pb = full_ind.bb.pct_b.iloc[-1]
+        if not pd.isna(pb):
+            pct_b = float(pb)
+
+    regime = result.regime.primary
+
+    adj: dict[str, int] = {}
+
+    if rsi < 30:        adj["RSI"] = +15
+    elif rsi < 35:      adj["RSI"] = +10
+    elif rsi < 40:      adj["RSI"] = +5
+    elif rsi <= 60:     adj["RSI"] = 0
+    elif rsi < 65:      adj["RSI"] = -5
+    elif rsi < 70:      adj["RSI"] = -10
+    else:               adj["RSI"] = -15
+
+    if macd_val > 0 and hist_rising:    adj["MACD"] = +12
+    elif macd_val > 0:                  adj["MACD"] = +6
+    elif macd_val < 0 and hist_rising:  adj["MACD"] = -3
+    else:                               adj["MACD"] = -12
+
+    pct20 = (price - sma20) / sma20 * 100
+    if pct20 > 3:    adj["SMA20"] = +10
+    elif pct20 > 1:  adj["SMA20"] = +6
+    elif pct20 > 0:  adj["SMA20"] = +3
+    elif pct20 > -1: adj["SMA20"] = -3
+    elif pct20 > -3: adj["SMA20"] = -6
+    else:            adj["SMA20"] = -10
+
+    pct50 = (price - sma50) / sma50 * 100
+    if pct50 > 3:    adj["SMA50"] = +10
+    elif pct50 > 1:  adj["SMA50"] = +6
+    elif pct50 > 0:  adj["SMA50"] = +3
+    elif pct50 > -1: adj["SMA50"] = -3
+    elif pct50 > -3: adj["SMA50"] = -6
+    else:            adj["SMA50"] = -10
+
+    if pct_b < 0:      adj["BB"] = +10
+    elif pct_b < 0.2:  adj["BB"] = +7
+    elif pct_b < 0.4:  adj["BB"] = +3
+    elif pct_b <= 0.6: adj["BB"] = 0
+    elif pct_b < 0.8:  adj["BB"] = -3
+    elif pct_b <= 1.0: adj["BB"] = -7
+    else:              adj["BB"] = -10
+
+    if adx < 20:
+        adj["ADX"] = 0
+    elif regime == ChartRegime.BEARISH:
+        adj["ADX"] = -8 if adx > 30 else -4
+    elif regime == ChartRegime.BULLISH:
+        adj["ADX"] = +8 if adx > 30 else +4
+    else:
+        adj["ADX"] = 0
+
+    if vwap > 0:
+        pct_vwap = (price - vwap) / vwap * 100
+        if pct_vwap > 2:    adj["VWAP"] = +8
+        elif pct_vwap > 0:  adj["VWAP"] = +4
+        elif pct_vwap > -2: adj["VWAP"] = -4
+        else:               adj["VWAP"] = -8
+    else:
+        adj["VWAP"] = 0
+
+    if squeeze_on:
+        if regime == ChartRegime.BULLISH:      adj["Squeeze"] = +3
+        elif regime == ChartRegime.BEARISH:    adj["Squeeze"] = -3
+        else:                                  adj["Squeeze"] = 0
+    else:
+        if last_hist > 0 and hist_rising:      adj["Squeeze"] = +7
+        elif last_hist > 0:                    adj["Squeeze"] = +3
+        elif last_hist < 0 and not hist_rising: adj["Squeeze"] = -7
+        else:                                  adj["Squeeze"] = -3
+
+    regime_map = {
+        ChartRegime.BULLISH:         +10,
+        ChartRegime.NEAR_SUPPORT:    +6,
+        ChartRegime.NEUTRAL:          0,
+        ChartRegime.NEAR_RESISTANCE: -6,
+        ChartRegime.BEARISH:         -10,
+        ChartRegime.OVEREXTENDED:    -8,
+    }
+    adj["Regime"] = regime_map.get(regime, 0)
+
+    total = sum(adj.values())
+    bull_prob = max(15.0, min(85.0, 50.0 + total))
+
+    if bull_prob >= 60:
+        emoji = "🟢"
+        color = "#3fb950"
+    elif bull_prob <= 40:
+        emoji = "🔴"
+        color = "#f85149"
+    else:
+        emoji = "🟡"
+        color = "#d29922"
+
+    bar_width = 28
+    marker_pos = int(bull_prob / 100 * bar_width)
+    bar = "\u2501" * marker_pos + "\u25CF" + "\u2501" * (bar_width - marker_pos)
+
+    st.markdown(
+        '<div style="'
+        "background:#161b22;"
+        "border:1px solid #30363d;"
+        "border-radius:8px;"
+        "padding:12px 16px;"
+        "margin:8px 0;"
+        'font-family:monospace;">'
+        '<div style="font-size:12px;color:#8b949e;margin-bottom:6px;">'
+        "\U0001f4ca Market Direction \u2014 {ticker}"
+        " &nbsp;\u00b7&nbsp; {dte} Day Outlook"
+        "</div>"
+        '<div style="display:flex;align-items:center;gap:8px;font-size:13px;">'
+        '<span style="color:#f85149;font-weight:700;">BEAR \u25c0</span>'
+        '<span style="color:{color};flex:1;letter-spacing:1px;">{bar}</span>'
+        '<span style="color:#3fb950;font-weight:700;">\u25b6 BULL</span>'
+        '<span style="color:{color};font-weight:700;font-size:15px;margin-left:8px;">'
+        "{prob}% {emoji}</span>"
+        "</div></div>".format(
+            ticker=ticker,
+            dte=dte,
+            color=color,
+            bar=bar,
+            prob=f"{bull_prob:.0f}",
+            emoji=emoji,
+        ),
+        unsafe_allow_html=True,
+    )
 
 
 # ---------------------------------------------------------------------------

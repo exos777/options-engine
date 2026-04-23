@@ -677,11 +677,7 @@ def render_recommendation_card(
 
         m5.metric(
             "Theta / day",
-            f"${c.theta:.4f}" if c.theta is not None else "—",
-        )
-        m5.metric(
-            "Vega / 1% IV",
-            f"${c.vega:.4f}" if c.vega is not None else "—",
+            f"${abs(c.theta):.3f}" if c.theta is not None else "—",
         )
 
         st.caption(
@@ -705,52 +701,35 @@ def render_recommendation_card(
         )
 
         # Seller's summary
-        ss1, ss2, ss3, ss4 = st.columns(4)
+        ss1, ss2 = st.columns(2)
 
-        # Theta income
-        ss1.metric(
-            "Theta / day",
-            f"${abs(c.theta):.3f}" if c.theta else "—",
-            help="Daily premium decay earned (per contract = ×100)",
-        )
         ss1.metric("Ann. Yield", f"{opt.annualized_return * 100:.1f}%")
-
-        # Expected move
-        em_status = "—"
-        em_boundary = "—"
-        em_buffer = "—"
-        if expected_move > 0 and current_price > 0:
-            em_pct = expected_move / current_price * 100
-            if strategy == Strategy.COVERED_CALL:
-                boundary = current_price + expected_move
-                outside = c.strike >= boundary
-                buffer = c.strike - boundary
-            else:
-                boundary = current_price - expected_move
-                outside = c.strike <= boundary
-                buffer = boundary - c.strike
-            em_status = "✅ Outside EM" if outside else "⚠️ Inside EM"
-            em_boundary = f"${boundary:.2f} (±{em_pct:.1f}%)"
-            em_buffer = f"${abs(buffer):.2f} {'buffer' if outside else 'exposure'}"
-
-        ss2.metric("EM Boundary", em_boundary)
-        ss2.metric("Strike vs EM", em_status)
-
-        # Vega risk
-        vega_risk = "—"
-        if c.vega:
-            av = abs(c.vega)
-            vega_risk = "Low" if av <= 0.15 else ("Medium" if av <= 0.30 else "High ⚠️")
-        ss3.metric("Vega Risk", vega_risk, help="IV expansion risk for short positions")
-        ss3.metric("EM Buffer", em_buffer)
 
         # Earnings + basis
         earnings_status = "🚨 In Window" if opt.earnings_in_window else "✅ Clear"
-        ss4.metric("Earnings", earnings_status)
+        ss2.metric("Earnings", earnings_status)
         if opt.above_cost_basis is True:
-            ss4.metric("vs Cost Basis", "✅ Above")
+            ss2.metric("vs Cost Basis", "✅ Above")
         elif opt.above_cost_basis is False:
-            ss4.metric("vs Cost Basis", "⚠️ Below")
+            ss2.metric("vs Cost Basis", "⚠️ Below")
+
+        # Assignment probability
+        assignment_prob = abs(c.delta or 0) * 100
+        if assignment_prob < 20:
+            _ap_label = f"\U0001f4cc Assignment Probability: {assignment_prob:.0f}% \u2705 Low"
+            _ap_color = "#3fb950"
+        elif assignment_prob < 35:
+            _ap_label = f"\U0001f4cc Assignment Probability: {assignment_prob:.0f}% \u26a0\ufe0f Moderate"
+            _ap_color = "#d29922"
+        else:
+            _ap_label = f"\U0001f4cc Assignment Probability: {assignment_prob:.0f}% \U0001f534 High"
+            _ap_color = "#f85149"
+        st.markdown(
+            '<span style="color:{c};font-weight:600;">{l}</span>'.format(
+                c=_ap_color, l=_ap_label,
+            ),
+            unsafe_allow_html=True,
+        )
 
         # Position sizing
         st.markdown(

@@ -694,8 +694,15 @@ def render_recommendation_card(
             f"Basis: {opt.basis_score:.0f}"
         )
 
-        # Plain English explanation
-        st.info(rec.explanation, icon="💡")
+        # Plain English explanation (escape $ to avoid LaTeX rendering)
+        _safe_text = rec.explanation.replace("$", "&#36;")
+        st.markdown(
+            '<div style="background:#1e3a5f;border-left:4px solid #58a6ff;'
+            'border-radius:4px;padding:10px 14px;margin:8px 0;'
+            'font-size:14px;color:#e6edf3;">'
+            "\U0001f4a1 " + _safe_text + "</div>",
+            unsafe_allow_html=True,
+        )
 
         # Seller's summary
         ss1, ss2, ss3, ss4 = st.columns(4)

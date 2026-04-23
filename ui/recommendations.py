@@ -777,23 +777,34 @@ def _render_what_happens_next(
         target_lo = c.strike * 1.03
         target_hi = c.strike * 1.05
         st.markdown(
-            f"**What happens next:**\n\n"
-            f"\u2705 **If expires worthless:** "
-            f"Keep ${premium:.2f} premium. Sell another CSP next week.\n\n"
-            f"\U0001f4cc **If assigned at ${c.strike:.2f}:** "
-            f"You buy 100 shares. Effective cost basis: ${effective_basis:.2f}\n\n"
-            f"\u27a1\ufe0f **Immediate next step:** "
-            f"Sell covered call above ${c.strike:.2f} targeting "
-            f"${target_lo:.2f}\u2013${target_hi:.2f} strike for 7\u201314 DTE."
+            "<b>What happens next:</b><br><br>"
+            "\u2705 <b>If expires worthless:</b> "
+            "Keep {premium} premium. Sell another CSP next week.<br><br>"
+            "\U0001f4cc <b>If assigned at {strike}:</b> "
+            "You buy 100 shares. Effective cost basis: {basis}<br><br>"
+            "\u27a1\ufe0f <b>Immediate next step:</b> "
+            "Sell covered call above {strike} targeting "
+            "{lo}\u2013{hi} strike for 7\u201314 DTE.".format(
+                premium=f"${premium:.2f}",
+                strike=f"${c.strike:.2f}",
+                basis=f"${effective_basis:.2f}",
+                lo=f"${target_lo:.2f}",
+                hi=f"${target_hi:.2f}",
+            ),
+            unsafe_allow_html=True,
         )
     else:
         st.markdown(
-            f"**What happens next:**\n\n"
-            f"\u2705 **If expires worthless:** "
-            f"Keep ${premium:.2f} premium. "
-            f"Sell another CC next week.\n\n"
-            f"\U0001f4cc **If called away at ${c.strike:.2f}:** "
-            f"Position closed. Wheel complete \u2014 start new CSP cycle."
+            "<b>What happens next:</b><br><br>"
+            "\u2705 <b>If expires worthless:</b> "
+            "Keep {premium} premium. "
+            "Sell another CC next week.<br><br>"
+            "\U0001f4cc <b>If called away at {strike}:</b> "
+            "Position closed. Wheel complete \u2014 start new CSP cycle.".format(
+                premium=f"${premium:.2f}",
+                strike=f"${c.strike:.2f}",
+            ),
+            unsafe_allow_html=True,
         )
 
 

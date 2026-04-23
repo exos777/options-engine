@@ -771,11 +771,11 @@ def _render_what_happens_next(
             "\u27a1\ufe0f <b>Immediate next step:</b> "
             "Sell covered call above {strike} targeting "
             "{lo}\u2013{hi} strike for 7\u201314 DTE.".format(
-                premium=f"${premium:.2f}",
-                strike=f"${c.strike:.2f}",
-                basis=f"${effective_basis:.2f}",
-                lo=f"${target_lo:.2f}",
-                hi=f"${target_hi:.2f}",
+                premium=f"&#36;{premium:.2f}",
+                strike=f"&#36;{c.strike:.2f}",
+                basis=f"&#36;{effective_basis:.2f}",
+                lo=f"&#36;{target_lo:.2f}",
+                hi=f"&#36;{target_hi:.2f}",
             ),
             unsafe_allow_html=True,
         )
@@ -787,8 +787,8 @@ def _render_what_happens_next(
             "Sell another CC next week.<br><br>"
             "\U0001f4cc <b>If called away at {strike}:</b> "
             "Position closed. Wheel complete \u2014 start new CSP cycle.".format(
-                premium=f"${premium:.2f}",
-                strike=f"${c.strike:.2f}",
+                premium=f"&#36;{premium:.2f}",
+                strike=f"&#36;{c.strike:.2f}",
             ),
             unsafe_allow_html=True,
         )

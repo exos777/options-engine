@@ -58,15 +58,15 @@ _WEIGHTS: dict[RiskProfile, dict[str, float]] = {
         "em":        0.13,
         "basis":     0.05,
     },
-    # Balanced: income generation with controlled risk
+    # Balanced: wheel-aligned with cost basis compliance focus
     RiskProfile.BALANCED: {
-        "premium":   0.22,
-        "theta":     0.18,
-        "delta":     0.18,
-        "liquidity": 0.12,
-        "chart":     0.08,
-        "em":        0.12,
-        "basis":     0.10,
+        "premium":   0.15,
+        "theta":     0.10,
+        "delta":     0.15,
+        "liquidity": 0.10,
+        "chart":     0.15,
+        "em":        0.10,
+        "basis":     0.25,
     },
     # Aggressive: maximize premium and theta income
     RiskProfile.AGGRESSIVE: {
@@ -220,6 +220,11 @@ def score_covered_calls(
 
     Contracts that fail hard filters (spread, OI, premium, delta) are excluded.
     """
+    if dte < 5:
+        return []
+    if dte > 21:
+        return []
+
     # Adaptive weight redistribution: if no cost basis, redistribute
     # the "basis" weight proportionally to other factors
     weights = dict(_WEIGHTS[params.risk_profile])

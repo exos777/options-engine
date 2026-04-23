@@ -3,14 +3,14 @@ Recommendation engine.
 
 Orchestrates the full pipeline:
   1. Receives scored options (already filtered)
-  2. Selects the top 3 with distinct labels: Safest Income, Best Balance, Max Premium
-  3. Generates plain-English explanations for each
+  2. Selects the top 3 with distinct labels: Aggressive, Balanced, Conservative
+  3. Generates plain-English explanations with position sizing
   4. Builds the ScreenerResult for the UI layer
 
-Plain-English explanation rules:
-  - Safest Income  → lowest delta / widest OTM from the top-10 scored
-  - Best Balance   → highest composite score overall
-  - Max Premium    → highest annualised return from the top-10 scored
+Leg assignment:
+  - Leg 1 Aggressive   → highest annualised return from top-10
+  - Leg 2 Balanced     → highest composite score overall
+  - Leg 3 Conservative → lowest delta / widest OTM from top-10
 """
 
 from __future__ import annotations
@@ -111,27 +111,27 @@ def _explain_covered_call(
     income = f"earning ${option.premium:.2f} premium ({ann_ret:.1f}% annualised)"
     be = f"Break-even: ${option.break_even:.2f}."
 
-    if label == RecommendationLabel.SAFEST_INCOME:
-        delta_note = f"  Delta: {abs(c.delta):.2f}." if c.delta else ""
-        return (
-            f"{base}, {income}.{delta_note}{theta_note}{vega_note}{em_part}  "
-            f"{be}  Safest income: {regime_phrase}, plenty of room before assignment."
-        )
-
-    if label == RecommendationLabel.BEST_BALANCE:
-        chart_note = "  Strike near resistance — assignment at a reasonable level." if option.near_resistance else ""
-        return (
-            f"{base}, {income}.{theta_note}{vega_note}{em_part}{chart_note}  "
-            f"{be}  Best balance of premium, theta, and safety because {regime_phrase}."
-        )
-
-    if label == RecommendationLabel.MAX_PREMIUM:
+    if label == RecommendationLabel.AGGRESSIVE:
         caution = ""
         if c.delta and abs(c.delta) > 0.35:
             caution = f"  Note: delta {abs(c.delta):.2f} — higher assignment risk."
         return (
             f"{base}, {income} — highest available yield.{caution}{theta_note}{vega_note}{em_part}  "
             f"{be}  Chart context: {regime_phrase}."
+        )
+
+    if label == RecommendationLabel.BALANCED:
+        chart_note = "  Strike near resistance — assignment at a reasonable level." if option.near_resistance else ""
+        return (
+            f"{base}, {income}.{theta_note}{vega_note}{em_part}{chart_note}  "
+            f"{be}  Best balance of premium, theta, and safety because {regime_phrase}."
+        )
+
+    if label == RecommendationLabel.CONSERVATIVE:
+        delta_note = f"  Delta: {abs(c.delta):.2f}." if c.delta else ""
+        return (
+            f"{base}, {income}.{delta_note}{theta_note}{vega_note}{em_part}  "
+            f"{be}  Conservative choice: {regime_phrase}, plenty of room before assignment."
         )
 
     return f"{base}, {income}.  {be}"
@@ -166,20 +166,7 @@ def _explain_csp(
     base = f"The ${c.strike:.2f} put is {distance:.1f}% below the current price"
     income = f"collecting ${option.premium:.2f} ({ann_ret:.1f}% annualised)"
 
-    if label == RecommendationLabel.SAFEST_INCOME:
-        sup_note = "  Strike near support — historically defended entry." if option.near_support else ""
-        return (
-            f"{base}, {income}.{theta_note}{vega_note}{em_part}{sup_note}  "
-            f"{be}  Safest income: {regime_phrase}, assignment at a meaningful discount."
-        )
-
-    if label == RecommendationLabel.BEST_BALANCE:
-        return (
-            f"{base}, {income}.{theta_note}{vega_note}{em_part}  "
-            f"{be}  Best balance of premium, theta, and safety because {regime_phrase}."
-        )
-
-    if label == RecommendationLabel.MAX_PREMIUM:
+    if label == RecommendationLabel.AGGRESSIVE:
         caution = ""
         if c.delta and abs(c.delta) > 0.35:
             caution = f"  Delta {abs(c.delta):.2f} — assignment more likely, only suitable if willing to own."
@@ -188,12 +175,36 @@ def _explain_csp(
             f"{be}  Chart context: {regime_phrase}."
         )
 
+    if label == RecommendationLabel.BALANCED:
+        return (
+            f"{base}, {income}.{theta_note}{vega_note}{em_part}  "
+            f"{be}  Best balance of premium, theta, and safety because {regime_phrase}."
+        )
+
+    if label == RecommendationLabel.CONSERVATIVE:
+        sup_note = "  Strike near support — historically defended entry." if option.near_support else ""
+        return (
+            f"{base}, {income}.{theta_note}{vega_note}{em_part}{sup_note}  "
+            f"{be}  Conservative choice: {regime_phrase}, assignment at a meaningful discount."
+        )
+
     return f"{base}, {income}.  {be}"
 
 
 # ---------------------------------------------------------------------------
 # Label assignment
 # ---------------------------------------------------------------------------
+
+def _position_size(score: float) -> tuple[str, str]:
+    """Return (size_label, reason) based on composite score."""
+    if score >= 75:
+        return "\u2705 Full Size", "Strong setup \u2014 all signals aligned"
+    if score >= 60:
+        return "\u26a1 Half Size", "Good setup \u2014 some signals mixed"
+    if score >= 45:
+        return "\u26a0\ufe0f Quarter Size", "Weak setup \u2014 proceed with caution"
+    return "\u26d4 No Trade", "Score too low \u2014 skip this week"
+
 
 def _pick_recommendations(
     scored: list[ScoredOption],
@@ -204,30 +215,30 @@ def _pick_recommendations(
     current_price: float = 0.0,
 ) -> list[Recommendation]:
     """
-    Pick three seller-focused recommendations with distinct labels.
+    Pick three wheel-strategy recommendations with distinct labels.
 
-    - Best Balance  : highest composite score (best risk-adjusted income)
-    - Safest Income : lowest assignment risk (lowest delta) from top-10
-    - Max Premium   : highest annualised yield from top-10 (with caution if risky)
+    - Leg 1 Aggressive  : highest annualised yield from top-10
+    - Leg 2 Balanced    : highest composite score (best risk-adjusted income)
+    - Leg 3 Conservative: lowest assignment risk (lowest delta) from top-10
     """
     if not scored:
         return []
 
     top10 = scored[:10]
 
-    # Best Balance: highest composite score
-    best_balance = top10[0]
+    # Leg 2 — Balanced: highest composite score
+    balanced = top10[0]
 
-    # Safest Income: lowest absolute delta → least assignment risk
+    # Leg 3 — Conservative: lowest absolute delta
     def safest_key(o: ScoredOption) -> float:
         if o.contract.delta is not None:
             return abs(o.contract.delta)
-        return -o.distance_pct  # fallback: further OTM = safer
+        return -o.distance_pct
 
-    safest = min(top10, key=safest_key)
+    conservative = min(top10, key=safest_key)
 
-    # Max Premium: highest annualized income
-    max_prem = max(top10, key=lambda o: o.annualized_return)
+    # Leg 1 — Aggressive: highest annualized income
+    aggressive = max(top10, key=lambda o: o.annualized_return)
 
     explain_fn = _explain_covered_call if strategy == Strategy.COVERED_CALL else _explain_csp
 
@@ -235,9 +246,9 @@ def _pick_recommendations(
     seen_strikes: set[float] = set()
 
     for label, option in [
-        (RecommendationLabel.BEST_BALANCE, best_balance),
-        (RecommendationLabel.SAFEST_INCOME, safest),
-        (RecommendationLabel.MAX_PREMIUM, max_prem),
+        (RecommendationLabel.AGGRESSIVE, aggressive),
+        (RecommendationLabel.BALANCED, balanced),
+        (RecommendationLabel.CONSERVATIVE, conservative),
     ]:
         if option.contract.strike in seen_strikes:
             candidates = [o for o in top10 if o.contract.strike not in seen_strikes]
@@ -245,6 +256,8 @@ def _pick_recommendations(
                 continue
             option = candidates[0]
         seen_strikes.add(option.contract.strike)
+
+        size, reason = _position_size(option.score)
         recs.append(
             Recommendation(
                 label=label,
@@ -254,6 +267,8 @@ def _pick_recommendations(
                     expected_move=expected_move,
                     current_price=current_price,
                 ),
+                position_size=size,
+                position_size_reason=reason,
             )
         )
 

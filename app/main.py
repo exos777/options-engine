@@ -208,6 +208,45 @@ with st.sidebar:
     strategy = Strategy(strategy_choice)
 
     st.divider()
+    st.subheader("Wheel Phase")
+
+    wheel_phase = st.radio(
+        "Current Phase",
+        options=[
+            "\U0001f4c9 CSP Phase \u2014 Entering Position",
+            "\U0001f4c8 CC Phase \u2014 Assigned, Reducing Basis",
+        ],
+        index=0 if strategy == Strategy.CASH_SECURED_PUT else 1,
+        help="CSP = selling puts to enter\nCC = assigned, selling calls to exit",
+    )
+
+    assignment_price_val: float = 0.0
+    total_premium_collected: float = 0.0
+
+    if "CC Phase" in wheel_phase:
+        assignment_price_val = st.number_input(
+            "Assignment Price ($)",
+            min_value=0.0,
+            value=0.0,
+            step=0.01,
+            help="Price you were assigned at",
+        )
+        total_premium_collected = st.number_input(
+            "Total Premium Collected ($)",
+            min_value=0.0,
+            value=0.0,
+            step=0.01,
+            help="All premium collected so far in this wheel",
+        )
+        if assignment_price_val > 0:
+            effective_basis = assignment_price_val - total_premium_collected
+            st.metric(
+                "Effective Cost Basis",
+                f"${effective_basis:.2f}",
+                delta=f"-${total_premium_collected:.2f} from premium",
+            )
+
+    st.divider()
     st.subheader("Expiration")
 
     # We fetch expirations after the run button; store in session state

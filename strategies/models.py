@@ -36,9 +36,9 @@ class ChartRegime(str, Enum):
 
 
 class RecommendationLabel(str, Enum):
-    SAFEST_INCOME = "Safest Income"
-    BEST_BALANCE = "Best Balance"
-    MAX_PREMIUM = "Max Premium"
+    AGGRESSIVE = "Leg 1 — Aggressive"
+    BALANCED = "Leg 2 — Balanced"
+    CONSERVATIVE = "Leg 3 — Conservative"
 
 
 # ---------------------------------------------------------------------------
@@ -186,6 +186,8 @@ class Recommendation:
     label: RecommendationLabel
     option: ScoredOption
     explanation: str
+    position_size: str = "No Trade"
+    position_size_reason: str = ""
 
 
 @dataclass

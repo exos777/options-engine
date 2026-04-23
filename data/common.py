@@ -37,19 +37,27 @@ def safe_int(val, default: int = 0) -> int:
 
 
 def nearest_weekly_expiration(expirations: tuple[str, ...]) -> str:
-    """Return the nearest Friday expiration, or nearest overall."""
+    """Return the best expiration in the 7-14 DTE window, or nearest Friday."""
     today = date.today()
     candidates = []
     for exp_str in expirations:
         exp = date.fromisoformat(exp_str)
+        dte = (exp - today).days
         if exp >= today:
-            candidates.append(exp)
+            candidates.append((exp, dte))
+
     if not candidates:
         raise ValueError("No future expirations found.")
-    friday_candidates = [e for e in candidates if e.weekday() == 4]
-    if friday_candidates:
-        return friday_candidates[0].isoformat()
-    return sorted(candidates)[0].isoformat()
+
+    ideal = [(exp, dte) for exp, dte in candidates if 7 <= dte <= 14]
+    if ideal:
+        return sorted(ideal, key=lambda x: x[1])[0][0].isoformat()
+
+    fridays = [(exp, dte) for exp, dte in candidates if exp.weekday() == 4 and dte > 0]
+    if fridays:
+        return sorted(fridays, key=lambda x: x[1])[0][0].isoformat()
+
+    return sorted(candidates, key=lambda x: x[1])[0][0].isoformat()
 
 
 def days_to_expiration(expiration: str) -> int:

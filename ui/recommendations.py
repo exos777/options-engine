@@ -28,9 +28,9 @@ from strategies.models import (
 # ---------------------------------------------------------------------------
 
 _LABEL_EMOJI = {
-    RecommendationLabel.SAFEST_INCOME: "🛡️",
-    RecommendationLabel.BEST_BALANCE:  "⚖️",
-    RecommendationLabel.MAX_PREMIUM:   "💰",
+    RecommendationLabel.AGGRESSIVE:   "🔥",
+    RecommendationLabel.BALANCED:     "⚖️",
+    RecommendationLabel.CONSERVATIVE: "🛡️",
 }
 
 _REGIME_COLOR = {
@@ -745,6 +745,11 @@ def render_recommendation_card(
         elif opt.above_cost_basis is False:
             ss4.metric("vs Cost Basis", "⚠️ Below")
 
+        # Position sizing
+        st.markdown(
+            f"**Position Size:** {rec.position_size}  \u2014  {rec.position_size_reason}"
+        )
+
         # S/R context badges
         tags = []
         if opt.near_support:
@@ -753,6 +758,103 @@ def render_recommendation_card(
             tags.append("🔴 Near Resistance")
         if tags:
             st.caption("  ".join(tags))
+
+        # What happens next
+        _render_what_happens_next(rec, strategy, current_price)
+
+
+def _render_what_happens_next(
+    rec: Recommendation,
+    strategy: Strategy,
+    current_price: float,
+) -> None:
+    """Show the wheel-strategy next steps for a recommendation."""
+    c = rec.option.contract
+    premium = rec.option.premium
+
+    if strategy == Strategy.CASH_SECURED_PUT:
+        effective_basis = c.strike - premium
+        target_lo = c.strike * 1.03
+        target_hi = c.strike * 1.05
+        st.markdown(
+            f"**What happens next:**\n\n"
+            f"\u2705 **If expires worthless:** "
+            f"Keep ${premium:.2f} premium. Sell another CSP next week.\n\n"
+            f"\U0001f4cc **If assigned at ${c.strike:.2f}:** "
+            f"You buy 100 shares. Effective cost basis: ${effective_basis:.2f}\n\n"
+            f"\u27a1\ufe0f **Immediate next step:** "
+            f"Sell covered call above ${c.strike:.2f} targeting "
+            f"${target_lo:.2f}\u2013${target_hi:.2f} strike for 7\u201314 DTE."
+        )
+    else:
+        st.markdown(
+            f"**What happens next:**\n\n"
+            f"\u2705 **If expires worthless:** "
+            f"Keep ${premium:.2f} premium. "
+            f"Sell another CC next week.\n\n"
+            f"\U0001f4cc **If called away at ${c.strike:.2f}:** "
+            f"Position closed. Wheel complete \u2014 start new CSP cycle."
+        )
+
+
+# ---------------------------------------------------------------------------
+# Wheel summary card
+# ---------------------------------------------------------------------------
+
+def render_wheel_summary(
+    result: ScreenerResult,
+    strategy: Strategy,
+) -> None:
+    """Render the wheel strategy summary card at the top of recommendations."""
+    recs = result.recommendations
+    if not recs:
+        no_trade_reason = (
+            result.warnings[0] if result.warnings
+            else "Conditions unfavorable"
+        )
+        st.error(f"\u26d4 NO TRADE \u2014 {no_trade_reason}")
+        return
+
+    total_premium = sum(r.option.premium for r in recs)
+    avg_breakeven = sum(r.option.break_even for r in recs) / len(recs)
+    best_size = recs[0].position_size
+
+    st.markdown(
+        '<div style="'
+        "background:#161b22;"
+        "border:1px solid #30363d;"
+        "border-left:4px solid #3fb950;"
+        "border-radius:8px;"
+        "padding:16px;"
+        'margin:8px 0;">'
+        '<div style="font-size:14px;font-weight:700;'
+        'color:#e6edf3;margin-bottom:12px;">'
+        "\U0001f3a1 Wheel Strategy Summary \u2014 {ticker}"
+        "</div>"
+        '<div style="display:grid;'
+        "grid-template-columns:repeat(4,1fr);"
+        'gap:12px;font-family:monospace;">'
+        '<div><div style="color:#8b949e;font-size:11px;">LEGS AVAILABLE</div>'
+        '<div style="color:#e6edf3;font-size:16px;font-weight:700;">'
+        "{legs}/3</div></div>"
+        '<div><div style="color:#8b949e;font-size:11px;">TOTAL PREMIUM</div>'
+        '<div style="color:#3fb950;font-size:16px;font-weight:700;">'
+        "${total_premium}</div></div>"
+        '<div><div style="color:#8b949e;font-size:11px;">AVG BREAK-EVEN</div>'
+        '<div style="color:#58a6ff;font-size:16px;font-weight:700;">'
+        "${avg_breakeven}</div></div>"
+        '<div><div style="color:#8b949e;font-size:11px;">POSITION SIZE</div>'
+        '<div style="font-size:14px;font-weight:700;">'
+        "{best_size}</div></div>"
+        "</div></div>".format(
+            ticker=result.quote.ticker,
+            legs=len(recs),
+            total_premium=f"{total_premium:.2f}",
+            avg_breakeven=f"{avg_breakeven:.2f}",
+            best_size=best_size,
+        ),
+        unsafe_allow_html=True,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -766,6 +868,8 @@ def render_recommendations(
 ) -> None:
     """Render all recommendations, or a no-trade message if list is empty."""
     st.subheader("Recommendations")
+
+    render_wheel_summary(result, strategy)
 
     if not result.recommendations:
         if result.regime.trade_bias == "skip":

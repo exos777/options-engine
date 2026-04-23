@@ -60,15 +60,15 @@ _WEIGHTS: dict[RiskProfile, dict[str, float]] = {
         "em":        0.13,
         "buy_price": 0.05,
     },
-    # Balanced: income generation with controlled assignment risk
+    # Balanced: wheel-aligned income with assignment quality focus
     RiskProfile.BALANCED: {
-        "premium":   0.22,
-        "theta":     0.18,
-        "delta":     0.18,
-        "liquidity": 0.12,
-        "chart":     0.08,
-        "em":        0.12,
-        "buy_price": 0.10,
+        "premium":   0.15,
+        "theta":     0.10,
+        "delta":     0.15,
+        "liquidity": 0.10,
+        "chart":     0.15,
+        "em":        0.15,
+        "buy_price": 0.20,
     },
     # Aggressive: maximize premium and theta income
     RiskProfile.AGGRESSIVE: {
@@ -243,6 +243,7 @@ def score_cash_secured_puts(
     iv_52w_low: Optional[float] = None,
     earnings_date: Optional[str] = None,
     expected_move: float = 0.0,
+    iv_percentile: Optional[float] = None,
 ) -> list[ScoredOption]:
     """
     Score each put option and return a filtered, sorted list of ScoredOption.
@@ -252,6 +253,13 @@ def score_cash_secured_puts(
     implied_volatility as the current IV reading.  When omitted, iv_rank_score
     defaults to 50 (neutral) so the weight is effectively zeroed out.
     """
+    if dte < 5:
+        return []
+    if dte > 21:
+        return []
+    if iv_percentile is not None and iv_percentile < 25:
+        return []
+
     # Adaptive weight redistribution: if no desired buy price, redistribute
     # the "buy_price" weight proportionally to other factors
     weights = dict(_WEIGHTS[params.risk_profile])

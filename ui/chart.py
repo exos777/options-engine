@@ -30,9 +30,9 @@ _COL_BB      = "rgba(100,181,246,0.15)"  # semi-transparent blue fill
 _COL_BB_LINE = "rgba(100,181,246,0.50)"  # BB band borders
 _COL_SUPPORT = "#26a69a"   # teal
 _COL_RESIST  = "#ef5350"   # red
-_COL_SAFEST  = "#66bb6a"   # green
-_COL_BALANCE = "#f7c948"   # gold
-_COL_MAXPREM = "#ef5350"   # red
+_COL_CONSERVATIVE = "#66bb6a"  # green
+_COL_BALANCED     = "#f7c948"  # gold
+_COL_AGGRESSIVE   = "#ef5350"  # red
 _COL_VOLUME  = "#90a4ae"   # grey
 _COL_MACD    = "#ce93d8"   # purple
 _COL_SIGNAL  = "#f7c948"   # gold
@@ -40,11 +40,11 @@ _COL_SIGNAL  = "#f7c948"   # gold
 
 def _label_color(label_str: str) -> str:
     s = label_str.lower()
-    if "safest" in s:
-        return _COL_SAFEST
-    if "balance" in s:
-        return _COL_BALANCE
-    return _COL_MAXPREM
+    if "conservative" in s:
+        return _COL_CONSERVATIVE
+    if "balanced" in s:
+        return _COL_BALANCED
+    return _COL_AGGRESSIVE
 
 
 # ---------------------------------------------------------------------------

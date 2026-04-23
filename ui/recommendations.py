@@ -284,15 +284,37 @@ def render_direction_gauge(
     total = sum(adj.values())
     bull_prob = max(15.0, min(85.0, 50.0 + total))
 
-    if bull_prob >= 60:
+    if bull_prob > 50:
+        display_pct = bull_prob
+        display_label = "Bullish"
         emoji = "🟢"
         color = "#3fb950"
-    elif bull_prob <= 40:
+    elif bull_prob < 50:
+        display_pct = 100 - bull_prob
+        display_label = "Bearish"
         emoji = "🔴"
         color = "#f85149"
     else:
+        display_pct = 50.0
+        display_label = "Neutral"
         emoji = "🟡"
         color = "#d29922"
+
+    if display_label == "Bullish":
+        if display_pct >= 70:
+            strat = "Strong Bullish \u2192 Sell CSPs Aggressively"
+        else:
+            strat = "Leaning Bullish \u2192 Good for CSPs"
+        s_color = "#3fb950"
+    elif display_label == "Bearish":
+        if display_pct >= 70:
+            strat = "Strong Bearish \u2192 Sell Covered Calls"
+        else:
+            strat = "Leaning Bearish \u2192 Cautious on CSPs"
+        s_color = "#f85149"
+    else:
+        strat = "Neutral \u2192 Selective on Both"
+        s_color = "#d29922"
 
     bar_width = 28
     marker_pos = int(bull_prob / 100 * bar_width)
@@ -314,15 +336,25 @@ def render_direction_gauge(
         '<span style="color:#f85149;font-weight:700;">BEAR \u25c0</span>'
         '<span style="color:{color};flex:1;letter-spacing:1px;">{bar}</span>'
         '<span style="color:#3fb950;font-weight:700;">\u25b6 BULL</span>'
-        '<span style="color:{color};font-weight:700;font-size:15px;margin-left:8px;">'
-        "{prob}% {emoji}</span>"
+        '<span style="color:{color};font-weight:700;font-size:15px;">'
+        "{display_pct}% {display_label} {emoji}</span>"
+        " "
+        '<span style="color:{s_color};font-size:12px;'
+        "background:{s_color}22;"
+        "padding:2px 8px;"
+        "border-radius:4px;"
+        'border:1px solid {s_color}44;">'
+        "{strat}</span>"
         "</div></div>".format(
             ticker=ticker,
             dte=dte,
             color=color,
             bar=bar,
-            prob=f"{bull_prob:.0f}",
+            display_pct=f"{display_pct:.0f}",
+            display_label=display_label,
             emoji=emoji,
+            s_color=s_color,
+            strat=strat,
         ),
         unsafe_allow_html=True,
     )

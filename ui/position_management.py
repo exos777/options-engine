@@ -304,16 +304,6 @@ def render_position_manager(dp=None) -> None:
             index=0, key="pm_regime",
         )
 
-    # ── Close cost estimates ───────────────────────────
-    mid_val = (current_bid + current_ask) / 2
-    opt_val = (current_bid + mid_val) / 2
-
-    st.markdown("---")
-    est1, est2, est3 = st.columns(3)
-    est1.metric("Conservative Close", f"${current_ask:.2f}")
-    est2.metric("Realistic Close", f"${mid_val:.2f}")
-    est3.metric("Optimistic Close", f"${opt_val:.2f}")
-
     # ── Evaluate ───────────────────────────────────────
     if st.button(
         "\U0001f9e0 Evaluate Position",

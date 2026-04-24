@@ -710,6 +710,46 @@ def roll_vs_assign_verdict(
     }
 
 
+def verdict_confidence(
+    pos: OpenPosition,
+    best_roll: Optional[RollCandidate],
+    recommendation: str,
+) -> str:
+    """
+    Rate the verdict as 'High', 'Medium', or 'Low'.
+
+    For ROLL: driven by roll credit magnitude and effective-cost
+    improvement vs assignment cost.
+
+    For ASSIGN: High when no profitable roll exists at all;
+    Low when a roll nearly qualified.
+    """
+    if recommendation == "ROLL" and best_roll is not None:
+        if pos.strategy == "CSP":
+            assignment_cost = pos.strike - pos.original_premium
+        else:
+            assignment_cost = pos.strike
+        new_cost = new_effective_cost(pos, best_roll)
+        improvement = abs(assignment_cost - new_cost)
+        credit = best_roll.roll_credit
+
+        if credit >= 0.50 and improvement >= 2.00:
+            return "High"
+        if credit >= 0.25 and improvement >= 0.75:
+            return "Medium"
+        return "Low"
+
+    # ASSIGN
+    if best_roll is None:
+        return "High"
+
+    # A roll candidate existed but failed the criteria — rate by how close
+    credit = best_roll.roll_credit
+    if credit <= 0 or (pos.strategy == "CSP" and best_roll.strike > pos.strike):
+        return "Medium"
+    return "Low"
+
+
 def find_best_roll_for_premium(
     roll_candidates: list[RollCandidate],
     pos: OpenPosition,

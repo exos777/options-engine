@@ -19,6 +19,7 @@ from scoring.position_decision import (
     find_best_roll_for_premium,
     new_effective_cost,
     roll_vs_assign_verdict,
+    verdict_confidence,
 )
 from strategies.models import RegimeResult, ChartRegime
 
@@ -442,6 +443,23 @@ def test_verdict_cc_roll_when_strike_raised_with_credit():
     v = roll_vs_assign_verdict(pos, c)
     assert v["recommendation"] == "ROLL"
     assert "roll to" in v["explanation"].lower() or "raising" in v["explanation"].lower()
+
+
+def test_confidence_roll_high_on_big_credit_and_improvement():
+    pos = make_csp(strike=370, original_premium=4.50)
+    c = make_roll(strike=365, roll_credit=1.00)  # improvement ~5.50
+    assert verdict_confidence(pos, c, "ROLL") == "High"
+
+
+def test_confidence_roll_low_on_thin_numbers():
+    pos = make_csp(strike=370, original_premium=4.50)
+    c = make_roll(strike=369, roll_credit=0.10)
+    assert verdict_confidence(pos, c, "ROLL") == "Low"
+
+
+def test_confidence_assign_high_when_no_roll():
+    pos = make_csp(strike=370, original_premium=4.50)
+    assert verdict_confidence(pos, None, "ASSIGN") == "High"
 
 
 def test_verdict_cc_assign_when_strike_lowered():

@@ -34,6 +34,7 @@ from scoring.engine import run_screener
 from strategies.models import FilterParams, RiskProfile, Strategy
 from ui.chart import build_price_chart
 from ui import recommendations as rec_ui
+from ui.position_management import render_position_manager
 
 
 # ---------------------------------------------------------------------------
@@ -566,50 +567,58 @@ hist_df = st.session_state.get("hist_df")
 full_ind = st.session_state.get("full_ind")
 expected_move: float = st.session_state.get("expected_move", 0.0)
 
-if result is None:
-    st.info(
-        "Enter a ticker and click **Run Screener** to get started.",
-        icon="👈",
+tab_screener, tab_position = st.tabs([
+    "\U0001f4ca Options Screener",
+    "\U0001f504 Position Manager",
+])
+
+with tab_screener:
+    if result is None:
+        st.info(
+            "Enter a ticker and click **Run Screener** to get started.",
+            icon="👈",
+        )
+    else:
+        # A. Market Overview
+        st.divider()
+        st.subheader(f"Market Overview — {result.quote.ticker}")
+        rec_ui.render_market_overview(result, strategy, full_ind)
+
+        # A2. Price Forecast (2-zone bias bar)
+        rec_ui.render_price_forecast(result, strategy, full_ind)
+
+        # B. Technical Chart
+        st.divider()
+        st.subheader("Technical Chart")
+        if full_ind is not None and hist_df is not None and not hist_df.empty:
+            fig = build_price_chart(
+                full_ind=full_ind,
+                support_levels=result.support_levels,
+                resistance_levels=result.resistance_levels,
+                recommendations=result.recommendations,
+                ticker=result.quote.ticker,
+                expiration=result.expiration,
+                current_price=result.quote.price,
+                expected_move=expected_move,
+            )
+            st.plotly_chart(fig, use_container_width=True)
+
+        # C. Recommendations
+        st.divider()
+        rec_ui.render_recommendations(result, strategy, expected_move=expected_move)
+
+        # D. Ranked Option Table
+        st.divider()
+        rec_ui.render_option_table(result)
+
+    # Footer
+    st.divider()
+    _footer_source = "Schwab (real-time)" if _use_schwab else "Yahoo Finance (15-min delayed)"
+    st.caption(
+        f"Data provided by {_footer_source}. "
+        "This tool is for educational and informational purposes only. "
+        "Not financial advice."
     )
-    st.stop()
 
-# A. Market Overview
-st.divider()
-st.subheader(f"Market Overview — {result.quote.ticker}")
-rec_ui.render_market_overview(result, strategy, full_ind)
-
-# A2. Price Forecast (2-zone bias bar)
-rec_ui.render_price_forecast(result, strategy, full_ind)
-
-# B. Technical Chart
-st.divider()
-st.subheader("Technical Chart")
-if full_ind is not None and hist_df is not None and not hist_df.empty:
-    fig = build_price_chart(
-        full_ind=full_ind,
-        support_levels=result.support_levels,
-        resistance_levels=result.resistance_levels,
-        recommendations=result.recommendations,
-        ticker=result.quote.ticker,
-        expiration=result.expiration,
-        current_price=result.quote.price,
-        expected_move=expected_move,
-    )
-    st.plotly_chart(fig, use_container_width=True)
-
-# C. Recommendations
-st.divider()
-rec_ui.render_recommendations(result, strategy, expected_move=expected_move)
-
-# D. Ranked Option Table
-st.divider()
-rec_ui.render_option_table(result)
-
-# Footer
-st.divider()
-_footer_source = "Schwab (real-time)" if _use_schwab else "Yahoo Finance (15-min delayed)"
-st.caption(
-    f"Data provided by {_footer_source}. "
-    "This tool is for educational and informational purposes only. "
-    "Not financial advice."
-)
+with tab_position:
+    render_position_manager()

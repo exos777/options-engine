@@ -8,7 +8,7 @@ from datetime import date
 
 import streamlit as st
 
-from data.common import days_to_expiration
+from data.common import days_to_expiration, get_selected_contract
 from scoring.position_decision import (
     OpenPosition,
     RollCandidate,
@@ -105,14 +105,13 @@ def _fetch_roll_candidates(
 
 
 def _do_fetch(dp, ticker: str, expiration: str, strike: float, strategy: str) -> None:
-    """Fetch live quote + option data and store in session state."""
+    """Fetch live quote + option data for the selected expiration/strike."""
     try:
         quote = dp.get_quote(ticker)
         st.session_state["pm_auto_price"] = quote.price
 
         if quote.earnings_date:
             try:
-                from datetime import date
                 ed = date.fromisoformat(quote.earnings_date)
                 exp = date.fromisoformat(expiration)
                 st.session_state["pm_auto_earnings"] = ed <= exp
@@ -121,28 +120,24 @@ def _do_fetch(dp, ticker: str, expiration: str, strike: float, strategy: str) ->
         else:
             st.session_state["pm_auto_earnings"] = False
 
-        calls, puts = dp.get_option_chain(ticker, expiration)
-        chain = puts if strategy == "CSP" else calls
+        selected = get_selected_contract(dp, ticker, expiration, strike, strategy)
+        st.session_state["pm_auto_dte"] = selected.dte
 
-        contract = next(
-            (c for c in chain if abs(c.strike - strike) < 0.01),
-            None,
-        )
-        if contract:
+        if selected.found:
+            contract = selected.contract
             st.session_state["pm_auto_bid"] = contract.bid
             st.session_state["pm_auto_ask"] = contract.ask
             st.session_state["pm_auto_iv"] = contract.implied_volatility or 0.0
             st.session_state["pm_auto_delta"] = (
                 abs(contract.delta) if contract.delta else 0.0
             )
-            st.session_state["pm_auto_dte"] = days_to_expiration(expiration)
             st.session_state["pm_fetch_ok"] = True
             st.session_state["pm_fetch_err"] = ""
         else:
             st.session_state["pm_fetch_ok"] = False
             st.session_state["pm_fetch_err"] = (
-                f"No {strategy} contract at strike ${strike:.2f} "
-                f"for {expiration}. Enter values manually."
+                selected.error
+                or "Strike not found for selected expiration."
             )
     except Exception as e:
         st.session_state["pm_fetch_ok"] = False
@@ -255,10 +250,18 @@ def render_position_manager(dp=None) -> None:
         implied_vol = float(st.session_state.get("pm_auto_iv", 0.0))
         close_mode = "realistic"
 
-        dte_remaining = st.number_input(
-            "DTE Remaining", min_value=0, max_value=30,
-            value=st.session_state.get("pm_auto_dte", 5),
-            key="pm_dte",
+        if expiration:
+            try:
+                dte_remaining = days_to_expiration(expiration)
+            except Exception:
+                dte_remaining = 0
+        else:
+            dte_remaining = 0
+
+        st.metric(
+            "DTE Remaining",
+            f"{dte_remaining} days",
+            help="Auto-calculated from the selected expiration date.",
         )
 
     with col_right:

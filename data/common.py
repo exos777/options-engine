@@ -4,12 +4,25 @@ Shared data utilities used by both provider.py and schwab_provider.py.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import date
 from typing import Optional
 
 import pandas as pd
 
-from strategies.models import Quote
+from strategies.models import OptionContract, Quote
+
+
+@dataclass
+class SelectedContract:
+    """Result of a single-strike / single-expiration contract lookup."""
+    contract: Optional[OptionContract]
+    dte: int
+    error: Optional[str] = None
+
+    @property
+    def found(self) -> bool:
+        return self.contract is not None
 
 
 def safe_float(val, default: float = 0.0) -> float:
@@ -64,6 +77,53 @@ def days_to_expiration(expiration: str) -> int:
     """Return calendar days from today to expiration."""
     exp = date.fromisoformat(expiration)
     return max(0, (exp - date.today()).days)
+
+
+def get_selected_contract(
+    dp,
+    ticker: str,
+    expiration: str,
+    strike: float,
+    strategy: str,
+) -> SelectedContract:
+    """
+    Fetch the option chain for *expiration* and return the contract at
+    *strike* matching *strategy* ("CSP" -> puts, "CC" -> calls).
+
+    DTE is always computed from *expiration*, independent of whether the
+    strike is found — callers need the DTE even for "not found" UI state.
+    """
+    try:
+        dte = days_to_expiration(expiration)
+    except Exception as exc:
+        return SelectedContract(
+            contract=None,
+            dte=0,
+            error=f"Invalid expiration {expiration!r}: {exc}",
+        )
+
+    try:
+        calls, puts = dp.get_option_chain(ticker, expiration)
+    except Exception as exc:
+        return SelectedContract(
+            contract=None,
+            dte=dte,
+            error=f"Could not fetch option chain: {exc}",
+        )
+
+    chain = puts if strategy == "CSP" else calls
+    contract = next(
+        (c for c in chain if abs(c.strike - strike) < 0.01),
+        None,
+    )
+    if contract is None:
+        return SelectedContract(
+            contract=None,
+            dte=dte,
+            error="Strike not found for selected expiration.",
+        )
+
+    return SelectedContract(contract=contract, dte=dte, error=None)
 
 
 def earnings_warning(quote: Quote, expiration: str) -> Optional[str]:

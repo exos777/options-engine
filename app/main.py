@@ -621,4 +621,4 @@ with tab_screener:
     )
 
 with tab_position:
-    render_position_manager()
+    render_position_manager(dp=dp)

@@ -207,10 +207,7 @@ def render_position_manager(dp=None) -> None:
             value=4.50, step=0.10, key="pm_premium",
             help="Premium collected when this short was opened",
         )
-        times_rolled = st.number_input(
-            "Times Rolled", min_value=0, max_value=10,
-            value=0, key="pm_rolled",
-        )
+        times_rolled = 0
 
     # ── Auto-fetch on button press ─────────────────────
     if fetch_btn and dp is not None and ticker and expiration:
@@ -253,16 +250,10 @@ def render_position_manager(dp=None) -> None:
         )
 
     with col_mid:
-        current_bid = st.number_input(
-            "Current Option Bid ($)", min_value=0.0, step=0.01,
-            value=st.session_state.get("pm_auto_bid", 2.00),
-            key="pm_bid",
-        )
-        current_ask = st.number_input(
-            "Current Option Ask ($)", min_value=0.0, step=0.01,
-            value=st.session_state.get("pm_auto_ask", 2.20),
-            key="pm_ask",
-        )
+        current_bid = float(st.session_state.get("pm_auto_bid", 0.0))
+        current_ask = float(st.session_state.get("pm_auto_ask", 0.0))
+        implied_vol = float(st.session_state.get("pm_auto_iv", 0.0))
+
         close_mode = st.radio(
             "Close Cost Estimate",
             ["realistic", "conservative", "optimistic"],
@@ -272,13 +263,6 @@ def render_position_manager(dp=None) -> None:
                 "Conservative = ask price\n"
                 "Optimistic = between bid and mid"
             ),
-        )
-        implied_vol = st.number_input(
-            "Current IV (decimal, e.g. 0.45 = 45%)",
-            min_value=0.0, max_value=5.0, step=0.01,
-            value=st.session_state.get("pm_auto_iv", 0.0),
-            key="pm_iv",
-            help="Implied volatility of current option",
         )
         dte_remaining = st.number_input(
             "DTE Remaining", min_value=0, max_value=30,

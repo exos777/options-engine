@@ -253,17 +253,8 @@ def render_position_manager(dp=None) -> None:
         current_bid = float(st.session_state.get("pm_auto_bid", 0.0))
         current_ask = float(st.session_state.get("pm_auto_ask", 0.0))
         implied_vol = float(st.session_state.get("pm_auto_iv", 0.0))
+        close_mode = "realistic"
 
-        close_mode = st.radio(
-            "Close Cost Estimate",
-            ["realistic", "conservative", "optimistic"],
-            index=0, horizontal=True, key="pm_close_mode",
-            help=(
-                "Realistic = mid price\n"
-                "Conservative = ask price\n"
-                "Optimistic = between bid and mid"
-            ),
-        )
         dte_remaining = st.number_input(
             "DTE Remaining", min_value=0, max_value=30,
             value=st.session_state.get("pm_auto_dte", 5),

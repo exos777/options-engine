@@ -571,6 +571,38 @@ def _build_roll_candidates_filtered(
     return filtered
 
 
+def find_best_roll_for_premium(
+    roll_candidates: list[RollCandidate],
+    pos: OpenPosition,
+) -> Optional[RollCandidate]:
+    """
+    Find the roll candidate that maximizes net credit while meeting
+    minimum quality standards.
+
+    Quality requirements:
+      - Net credit > $0.20
+      - Spread < 15%
+      - For CSP: strike must be <= original strike (lower or same)
+      - For CC: strike must be >= cost basis
+    """
+    valid: list[RollCandidate] = []
+    for c in roll_candidates:
+        if c.roll_credit <= 0.20:
+            continue
+        if c.spread_pct > 0.15:
+            continue
+        if pos.strategy == "CSP" and c.strike > pos.strike:
+            continue
+        if pos.strategy == "CC" and pos.cost_basis > 0 and c.strike < pos.cost_basis:
+            continue
+        valid.append(c)
+
+    if not valid:
+        return None
+
+    return sorted(valid, key=lambda c: c.roll_credit, reverse=True)[0]
+
+
 # ---------------------------------------------------------------------------
 # Main evaluation
 # ---------------------------------------------------------------------------

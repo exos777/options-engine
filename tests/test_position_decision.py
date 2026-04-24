@@ -16,6 +16,7 @@ from scoring.position_decision import (
     _position_size_guidance,
     _build_roll_candidates_filtered,
     evaluate_position,
+    find_best_roll_for_premium,
 )
 from strategies.models import RegimeResult, ChartRegime
 
@@ -304,6 +305,62 @@ def test_full_size_clean_conditions():
         confidence=80.0,
     )
     assert "Full" in size
+
+
+# ── Best Roll for Maximum Premium ──────────────
+
+def test_best_roll_picks_max_credit():
+    pos = make_csp(strike=370, total_premium=4.50)
+    cands = [
+        make_roll(strike=365, roll_credit=0.40, spread_pct=0.05),
+        make_roll(strike=360, roll_credit=0.90, spread_pct=0.05),
+        make_roll(strike=368, roll_credit=0.55, spread_pct=0.05),
+    ]
+    best = find_best_roll_for_premium(cands, pos)
+    assert best is not None
+    assert best.roll_credit == pytest.approx(0.90)
+
+
+def test_best_roll_excludes_thin_credit():
+    pos = make_csp(strike=370, total_premium=4.50)
+    cands = [
+        make_roll(strike=365, roll_credit=0.15, spread_pct=0.05),
+        make_roll(strike=360, roll_credit=0.10, spread_pct=0.05),
+    ]
+    best = find_best_roll_for_premium(cands, pos)
+    assert best is None
+
+
+def test_best_roll_excludes_wide_spread():
+    pos = make_csp(strike=370, total_premium=4.50)
+    cands = [
+        make_roll(strike=365, roll_credit=0.80, spread_pct=0.25),
+    ]
+    best = find_best_roll_for_premium(cands, pos)
+    assert best is None
+
+
+def test_best_roll_csp_rejects_strike_above_original():
+    pos = make_csp(strike=370, total_premium=4.50)
+    cands = [
+        make_roll(strike=375, roll_credit=0.80, spread_pct=0.05),
+    ]
+    best = find_best_roll_for_premium(cands, pos)
+    assert best is None
+
+
+def test_best_roll_cc_rejects_strike_below_cost_basis():
+    pos = make_cc(strike=400, cost_basis=365.0)
+    cands = [
+        make_roll(strike=360, roll_credit=0.80, spread_pct=0.05),
+    ]
+    best = find_best_roll_for_premium(cands, pos)
+    assert best is None
+
+
+def test_best_roll_returns_none_on_empty():
+    pos = make_csp(strike=370, total_premium=4.50)
+    assert find_best_roll_for_premium([], pos) is None
 
 
 def test_no_exposure_poor_conditions():

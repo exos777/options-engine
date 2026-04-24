@@ -4,6 +4,8 @@ Streamlit UI for the Roll vs Assign position management decision engine.
 
 from __future__ import annotations
 
+from datetime import date
+
 import streamlit as st
 
 from data.common import days_to_expiration
@@ -11,6 +13,7 @@ from scoring.position_decision import (
     OpenPosition,
     RollCandidate,
     evaluate_position,
+    find_best_roll_for_premium,
 )
 from strategies.models import (
     ChartRegime,
@@ -33,6 +36,70 @@ def _spread_color(pct: float) -> str:
     if pct <= 0.10:
         return "#d29922"
     return "#f85149"
+
+
+def _fetch_roll_candidates(
+    dp,
+    ticker: str,
+    pos: OpenPosition,
+) -> list[RollCandidate]:
+    """Fetch option chains for 7-21 DTE expirations and build RollCandidate list."""
+    candidates: list[RollCandidate] = []
+    try:
+        expirations = dp.get_expirations(ticker)
+    except Exception:
+        return candidates
+
+    today = date.today()
+    strike_lo = pos.strike * 0.90
+    strike_hi = pos.strike * 1.10
+    chain_type = "puts" if pos.strategy == "CSP" else "calls"
+
+    for exp_str in expirations:
+        try:
+            dte = (date.fromisoformat(exp_str) - today).days
+        except Exception:
+            continue
+        if not (7 <= dte <= 21):
+            continue
+        try:
+            calls, puts = dp.get_option_chain(ticker, exp_str)
+        except Exception:
+            continue
+
+        chain = puts if chain_type == "puts" else calls
+        for opt in chain:
+            if not (strike_lo <= opt.strike <= strike_hi):
+                continue
+            if opt.mid <= 0:
+                continue
+            mid = opt.mid
+            bid = opt.bid
+            ask = opt.ask
+            spread_pct = (ask - bid) / max(mid, 0.01)
+            roll_credit = mid - pos.close_cost
+
+            if opt.strike < pos.strike:
+                roll_type = "down" if pos.strategy == "CSP" else "down"
+            elif opt.strike > pos.strike:
+                roll_type = "up"
+            else:
+                roll_type = "out"
+
+            candidates.append(RollCandidate(
+                strike=opt.strike,
+                expiration=exp_str,
+                dte=dte,
+                bid=bid,
+                ask=ask,
+                mid=mid,
+                delta=abs(opt.delta) if opt.delta is not None else 0.0,
+                open_interest=opt.open_interest or 0,
+                roll_credit=roll_credit,
+                roll_type=roll_type,
+                spread_pct=spread_pct,
+            ))
+    return candidates
 
 
 def _do_fetch(dp, ticker: str, expiration: str, strike: float, strategy: str) -> None:
@@ -302,13 +369,19 @@ def render_position_manager(dp=None) -> None:
             ),
         )
 
+        if dp is not None and ticker:
+            with st.spinner("Fetching roll candidates…"):
+                roll_cands = _fetch_roll_candidates(dp, ticker, pos)
+        else:
+            roll_cands = []
+
         decision = evaluate_position(
             pos=pos,
             current_price=current_price,
             regime=regime,
             support_levels=[],
             resistance_levels=[],
-            roll_candidates=[],
+            roll_candidates=roll_cands,
             next_cc_premium=0.0,
             has_earnings=has_earnings,
             implied_volatility=implied_vol,
@@ -317,7 +390,10 @@ def render_position_manager(dp=None) -> None:
             wants_to_keep_shares=wants_to_keep,
         )
 
-        _render_decision(decision, pos, current_price, implied_vol, dte_remaining)
+        _render_decision(
+            decision, pos, current_price, implied_vol, dte_remaining,
+            dp=dp, ticker=ticker, wants_assignment=wants_assignment,
+        )
 
 
 def _render_decision(
@@ -326,6 +402,9 @@ def _render_decision(
     current_price: float,
     implied_vol: float,
     dte_remaining: int,
+    dp=None,
+    ticker: str = "",
+    wants_assignment: bool = False,
 ) -> None:
     from scoring.position_decision import _calc_expected_move
 
@@ -449,6 +528,32 @@ def _render_decision(
         roll_df = pd.DataFrame(roll_rows)
         st.dataframe(roll_df, hide_index=True, use_container_width=True)
 
+    # ── Best Roll for Maximum Premium ──────────────────
+    best_roll = find_best_roll_for_premium(decision.roll_candidates, pos)
+    new_net_roll = 0.0
+    _render_best_roll_card(best_roll, pos)
+    if best_roll is not None:
+        new_net_roll = (
+            best_roll.strike
+            - pos.total_premium_collected
+            - best_roll.roll_credit
+        )
+
+    # ── Assignment Analysis ────────────────────────────
+    best_cc = None
+    best_cc_dte = 0
+    if wants_assignment and pos.strategy == "CSP":
+        best_cc, best_cc_dte = _find_best_immediate_cc(dp, ticker, pos)
+        _render_assignment_card(
+            pos, current_price, best_cc, best_cc_dte,
+        )
+
+    # ── Side-by-Side Comparison ────────────────────────
+    if wants_assignment and pos.strategy == "CSP":
+        _render_roll_vs_assign_comparison(
+            pos, best_roll, new_net_roll, best_cc,
+        )
+
     # ── What happens next ──────────────────────────────
     st.markdown("---")
     st.markdown("**\U0001f4cb What Happens Next**")
@@ -460,3 +565,291 @@ def _render_decision(
         "\U0001f4a1 " + _safe + "</div>",
         unsafe_allow_html=True,
     )
+
+
+def _render_best_roll_card(
+    best_roll: RollCandidate | None,
+    pos: OpenPosition,
+) -> None:
+    st.markdown("---")
+    if best_roll is None:
+        st.warning(
+            "\U0001f504 No profitable roll found. "
+            "No candidates generate meaningful credit. "
+            "Consider accepting assignment or closing."
+        )
+        return
+
+    st.markdown(
+        '<div style="'
+        "background:#161b22;"
+        "border:1px solid #30363d;"
+        "border-left:4px solid #58a6ff;"
+        "border-radius:8px;"
+        "padding:16px;"
+        'margin:8px 0;">',
+        unsafe_allow_html=True,
+    )
+    st.markdown("### \U0001f504 Best Roll for Maximum Premium")
+
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        direction = "Down" if best_roll.strike < pos.strike else "Out"
+        st.metric(
+            "Roll Strike",
+            f"${best_roll.strike:.2f}",
+            direction,
+        )
+    with col2:
+        st.metric(
+            "Expiration",
+            best_roll.expiration,
+            f"{best_roll.dte} DTE",
+        )
+    with col3:
+        st.metric(
+            "Net Roll Credit",
+            f"${best_roll.roll_credit:.2f}",
+            "per contract",
+        )
+    with col4:
+        new_net = (
+            best_roll.strike
+            - pos.total_premium_collected
+            - best_roll.roll_credit
+        )
+        st.metric(
+            "New Net Cost if Assigned",
+            f"${new_net:.2f}",
+            f"vs current ${pos.net_assigned_cost:.2f}",
+        )
+
+    st.caption(
+        f"Close current: ${pos.close_cost:.2f} · "
+        f"New premium: ${best_roll.mid:.2f} · "
+        f"Delta: {best_roll.delta:.2f} · "
+        f"OI: {best_roll.open_interest} · "
+        f"Spread: {best_roll.spread_pct * 100:.1f}%"
+    )
+
+    option_word = "put" if pos.strategy == "CSP" else "call"
+    action = (
+        f"Buy back ${pos.strike:.2f} {option_word} "
+        f"for ${pos.close_cost:.2f}. "
+        f"Sell ${best_roll.strike:.2f} {option_word} "
+        f"expiring {best_roll.expiration} "
+        f"for ${best_roll.mid:.2f}. "
+        f"Net credit: ${best_roll.roll_credit:.2f}."
+    )
+    st.info(f"➡️ {action}")
+
+    st.markdown("</div>", unsafe_allow_html=True)
+
+
+def _find_best_immediate_cc(
+    dp,
+    ticker: str,
+    pos: OpenPosition,
+):
+    """Find the highest-premium CC 2-8% above strike within 7-14 DTE."""
+    if dp is None or not ticker:
+        return None, 0
+
+    best_cc = None
+    best_cc_dte = 0
+    best_premium = 0.0
+    try:
+        expirations = dp.get_expirations(ticker)
+    except Exception:
+        return None, 0
+
+    today = date.today()
+    lo_strike = pos.strike * 1.02
+    hi_strike = pos.strike * 1.08
+
+    for exp_str in expirations:
+        try:
+            dte = (date.fromisoformat(exp_str) - today).days
+        except Exception:
+            continue
+        if not (7 <= dte <= 14):
+            continue
+        try:
+            calls, _puts = dp.get_option_chain(ticker, exp_str)
+        except Exception:
+            continue
+
+        cc_candidates = [
+            c for c in calls
+            if lo_strike <= c.strike <= hi_strike
+            and (c.open_interest or 0) >= 50
+            and c.mid >= 0.50
+        ]
+        if not cc_candidates:
+            continue
+
+        cc = max(cc_candidates, key=lambda c: c.mid)
+        if cc.mid > best_premium:
+            best_cc = cc
+            best_cc_dte = dte
+            best_premium = cc.mid
+
+    return best_cc, best_cc_dte
+
+
+def _render_assignment_card(
+    pos: OpenPosition,
+    current_price: float,
+    best_cc,
+    best_cc_dte: int,
+) -> None:
+    net_cost = pos.net_assigned_cost
+
+    st.markdown("---")
+    st.markdown("### ✅ Assignment Analysis")
+
+    assign_col1, assign_col2, assign_col3 = st.columns(3)
+
+    with assign_col1:
+        st.metric(
+            "You Get Assigned At",
+            f"${pos.strike:.2f}",
+            "per share",
+        )
+        st.metric(
+            "Net Cost Basis",
+            f"${net_cost:.2f}",
+            f"after ${pos.total_premium_collected:.2f} premium",
+        )
+
+    with assign_col2:
+        discount = current_price - net_cost
+        disc_label = "Buying at discount" if discount > 0 else "Paying premium"
+        st.metric(
+            "vs Current Price",
+            f"${current_price:.2f}",
+            f"{disc_label}: ${abs(discount):.2f}",
+        )
+
+        if pos.desired_buy_price > 0:
+            vs_desired = net_cost - pos.desired_buy_price
+            above_below = "above" if vs_desired > 0 else "below"
+            st.metric(
+                "vs Desired Buy Price",
+                f"${pos.desired_buy_price:.2f}",
+                f"${abs(vs_desired):.2f} {above_below} target",
+                delta_color="inverse" if vs_desired > 0 else "normal",
+            )
+
+    with assign_col3:
+        if best_cc is not None:
+            st.metric(
+                "Best Immediate CC",
+                f"${best_cc.strike:.2f} strike",
+                f"${best_cc.mid:.2f} premium · {best_cc_dte} DTE",
+            )
+            new_basis = net_cost - best_cc.mid
+            st.metric(
+                "Basis After CC",
+                f"${new_basis:.2f}",
+                f"-${best_cc.mid:.2f} from premium",
+            )
+        else:
+            st.metric(
+                "Immediate CC",
+                "No data",
+                "Enter IV to calculate",
+            )
+
+    if best_cc is not None:
+        profit_if_called = best_cc.strike - net_cost + best_cc.mid
+        st.success(
+            f"✅ If you accept assignment at ${pos.strike:.2f}:\n\n"
+            f"Net cost basis: ${net_cost:.2f}\n\n"
+            f"Immediately sell ${best_cc.strike:.2f} CC "
+            f"for ${best_cc.mid:.2f}\n\n"
+            f"New basis: ${net_cost - best_cc.mid:.2f}\n\n"
+            f"If called away at ${best_cc.strike:.2f}: "
+            f"Profit = ${profit_if_called:.2f}/share ✅\n\n"
+            f"If CC expires: Sell another CC, "
+            f"keep reducing basis"
+        )
+    else:
+        st.success(
+            f"✅ If assigned at ${pos.strike:.2f}:\n\n"
+            f"Net cost basis: ${net_cost:.2f}\n\n"
+            f"Immediately sell CC above ${pos.strike:.2f} for 7-14 DTE\n\n"
+            f"Target strike: "
+            f"${pos.strike * 1.03:.2f}–${pos.strike * 1.05:.2f}"
+        )
+
+    st.markdown("**Break-even Analysis:**")
+    be_col1, be_col2, be_col3 = st.columns(3)
+    with be_col1:
+        st.metric(
+            "Break-even (no CC)",
+            f"${net_cost:.2f}",
+            "stock must reach this",
+        )
+    with be_col2:
+        if best_cc is not None:
+            be_with_cc = net_cost - best_cc.mid
+            st.metric(
+                "Break-even (with 1 CC)",
+                f"${be_with_cc:.2f}",
+                f"-${best_cc.mid:.2f} from CC",
+            )
+        else:
+            st.metric("Break-even (with 1 CC)", "—", "no CC data")
+    with be_col3:
+        est_monthly_cc = (best_cc.mid if best_cc is not None else 2.0) * 4
+        be_monthly = net_cost - est_monthly_cc
+        st.metric(
+            "Est. Break-even (4 CCs)",
+            f"${be_monthly:.2f}",
+            f"-${est_monthly_cc:.2f} est.",
+        )
+
+
+def _render_roll_vs_assign_comparison(
+    pos: OpenPosition,
+    best_roll: RollCandidate | None,
+    new_net_roll: float,
+    best_cc,
+) -> None:
+    net_cost = pos.net_assigned_cost
+
+    st.markdown("---")
+    st.markdown("### ⚖️ Roll vs Assign — Side by Side")
+
+    comp_col1, comp_col2 = st.columns(2)
+
+    with comp_col1:
+        st.markdown("**\U0001f504 If You Roll**")
+        if best_roll is not None:
+            st.markdown(
+                f"- Roll to **${best_roll.strike:.2f}** "
+                f"exp {best_roll.expiration}\n"
+                f"- Collect **${best_roll.roll_credit:.2f}** credit\n"
+                f"- New net cost if assigned: "
+                f"**${new_net_roll:.2f}**\n"
+                f"- Assignment delayed {best_roll.dte} days\n"
+                f"- Capital still at risk: "
+                f"**${best_roll.strike * 100:.0f}**"
+            )
+        else:
+            st.markdown("No profitable roll available")
+
+    with comp_col2:
+        st.markdown("**✅ If You Accept Assignment**")
+        cc_prem_str = f"${best_cc.mid:.2f}" if best_cc is not None else "N/A"
+        cc_prem_val = best_cc.mid if best_cc is not None else 0.0
+        st.markdown(
+            f"- Own 100 shares at **${net_cost:.2f}**\n"
+            f"- Sell CC immediately for **{cc_prem_str}**\n"
+            f"- New basis: "
+            f"**${net_cost - cc_prem_val:.2f}**\n"
+            f"- Start earning CC income weekly\n"
+            f"- Capital deployed: "
+            f"**${net_cost * 100:.0f}**"
+        )

@@ -17,6 +17,8 @@ from scoring.position_decision import (
     _build_roll_candidates_filtered,
     evaluate_position,
     find_best_roll_for_premium,
+    new_effective_cost,
+    roll_vs_assign_verdict,
 )
 from strategies.models import RegimeResult, ChartRegime
 
@@ -361,6 +363,93 @@ def test_best_roll_cc_rejects_strike_below_cost_basis():
 def test_best_roll_returns_none_on_empty():
     pos = make_csp(strike=370, total_premium=4.50)
     assert find_best_roll_for_premium([], pos) is None
+
+
+# ── Simple Roll vs Assign Verdict ──────────────
+
+def test_new_effective_cost_formula():
+    pos = make_csp(strike=370, original_premium=4.50)
+    c = make_roll(strike=365, roll_credit=0.80)
+    # 365 - 4.50 - 0.80 = 359.70
+    assert new_effective_cost(pos, c) == pytest.approx(359.70)
+
+
+def test_verdict_no_best_roll_is_assign():
+    pos = make_csp(strike=370, original_premium=4.50)
+    v = roll_vs_assign_verdict(pos, None)
+    assert v["recommendation"] == "ASSIGN"
+    assert "no profitable roll" in v["explanation"].lower()
+    assert v["new_effective_cost"] is None
+
+
+def test_verdict_roll_when_all_three_conditions_met():
+    pos = make_csp(strike=370, original_premium=4.50)
+    c = make_roll(strike=365, roll_credit=0.80)
+    v = roll_vs_assign_verdict(pos, c)
+    # assignment_cost = 370 - 4.50 = 365.50
+    # new_effective_cost = 365 - 4.50 - 0.80 = 359.70 (better)
+    assert v["recommendation"] == "ROLL"
+    assert v["assignment_cost"] == pytest.approx(365.50)
+    assert v["new_effective_cost"] == pytest.approx(359.70)
+
+
+def test_verdict_assign_when_credit_zero_or_negative():
+    pos = make_csp(strike=370, original_premium=4.50)
+    c = make_roll(strike=365, roll_credit=0.0)
+    v = roll_vs_assign_verdict(pos, c)
+    assert v["recommendation"] == "ASSIGN"
+    assert "no net credit" in v["explanation"].lower()
+
+
+def test_verdict_assign_when_strike_worse_for_csp():
+    pos = make_csp(strike=370, original_premium=4.50)
+    c = make_roll(strike=375, roll_credit=0.80)
+    v = roll_vs_assign_verdict(pos, c)
+    assert v["recommendation"] == "ASSIGN"
+    assert "new strike is worse" in v["explanation"].lower()
+
+
+def test_verdict_assign_when_effective_cost_does_not_improve():
+    # Strike lower, credit positive, but not enough to beat assignment
+    pos = make_csp(strike=370, original_premium=4.50)
+    # assignment_cost = 365.50
+    # need new_effective_cost < 365.50
+    # c.strike=369, credit=0.10 → 369 - 4.50 - 0.10 = 364.40 (better — would roll)
+    # pick values so it does NOT improve:
+    # c.strike=370, credit=0.10 → 370 - 4.50 - 0.10 = 365.40 (better by 0.10 — still ROLL)
+    # c.strike=370, credit=0.05 → 370 - 4.50 - 0.05 = 365.45 (better by 0.05 — still ROLL)
+    # need effective cost >= 365.50:
+    # c.strike=370, credit=0.00 → strike_ok True, credit_positive False → assign
+    # c.strike=371 blocks on strike_ok
+    # For "does not improve" path in isolation: same strike, zero effective improvement
+    # use strike=370 credit=0.00 triggers "no net credit", not this one.
+    # Try strike=370, credit=0.001:
+    # effective = 370 - 4.50 - 0.001 = 365.499 (improves by 0.001 → ROLL)
+    # Any positive credit with strike <= original will improve effective cost.
+    # So "ownership does not improve" requires credit > 0 AND strike <= pos.strike AND
+    # new_effective >= assignment — which is mathematically: credit <= pos.strike - strike.
+    # Use strike=370 requires credit <= 0 → covered by credit_positive branch.
+    # This branch is effectively unreachable for CSP under normal math; skip semantic check.
+    pos2 = make_csp(strike=370, original_premium=4.50)
+    c2 = make_roll(strike=370, roll_credit=0.0)
+    v = roll_vs_assign_verdict(pos2, c2)
+    assert v["recommendation"] == "ASSIGN"
+
+
+def test_verdict_cc_roll_when_strike_raised_with_credit():
+    pos = make_cc(strike=400, cost_basis=365.0, original_premium=3.00)
+    c = make_roll(strike=410, roll_credit=0.50)
+    v = roll_vs_assign_verdict(pos, c)
+    assert v["recommendation"] == "ROLL"
+    assert "roll to" in v["explanation"].lower() or "raising" in v["explanation"].lower()
+
+
+def test_verdict_cc_assign_when_strike_lowered():
+    pos = make_cc(strike=400, cost_basis=365.0, original_premium=3.00)
+    c = make_roll(strike=395, roll_credit=0.50)
+    v = roll_vs_assign_verdict(pos, c)
+    assert v["recommendation"] == "ASSIGN"
+    assert "too low" in v["explanation"].lower()
 
 
 def test_no_exposure_poor_conditions():

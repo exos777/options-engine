@@ -571,6 +571,145 @@ def _build_roll_candidates_filtered(
     return filtered
 
 
+def new_effective_cost(
+    pos: OpenPosition,
+    candidate: RollCandidate,
+) -> float:
+    """
+    New Effective Cost = new strike - (original premium + net roll credit).
+
+    Intentionally uses only original_premium — no lifetime total tracking —
+    to keep the math simple for the current roll decision.
+    """
+    return candidate.strike - pos.original_premium - candidate.roll_credit
+
+
+def roll_vs_assign_verdict(
+    pos: OpenPosition,
+    best_roll: Optional[RollCandidate],
+) -> dict:
+    """
+    Simple ROLL vs ASSIGN verdict.
+
+    CSP roll is recommended only when all three hold:
+      1. Net roll credit is positive
+      2. New strike is lower (or same) than current strike
+      3. New effective cost is better than assignment cost
+
+    Returns a dict:
+      - recommendation: "ROLL" or "ASSIGN"
+      - explanation: 1-2 line reason
+      - next_action: concrete next step
+      - assignment_cost: float (CSP: strike - original_premium; CC: strike)
+      - new_effective_cost: float or None
+    """
+    if pos.strategy == "CSP":
+        assignment_cost = pos.strike - pos.original_premium
+    else:
+        assignment_cost = pos.strike
+
+    if best_roll is None:
+        next_action = (
+            f"Accept assignment at ${pos.strike:.2f}. "
+            f"Sell a covered call above ${pos.strike:.2f}."
+            if pos.strategy == "CSP"
+            else f"Let shares be called away at ${pos.strike:.2f}."
+        )
+        return {
+            "recommendation": "ASSIGN",
+            "explanation": "No profitable roll candidate available.",
+            "next_action": next_action,
+            "assignment_cost": assignment_cost,
+            "new_effective_cost": None,
+        }
+
+    new_cost = new_effective_cost(pos, best_roll)
+
+    credit_positive = best_roll.roll_credit > 0
+    if pos.strategy == "CSP":
+        strike_ok = best_roll.strike <= pos.strike
+        ownership_improves = new_cost < assignment_cost
+    else:
+        strike_ok = best_roll.strike >= pos.strike
+        ownership_improves = True
+
+    should_roll = credit_positive and strike_ok and ownership_improves
+
+    if should_roll:
+        if pos.strategy == "CSP":
+            explanation = (
+                f"Roll to ${best_roll.strike:.2f} for "
+                f"${best_roll.roll_credit:.2f} net credit. "
+                f"Effective cost drops to ${new_cost:.2f} "
+                f"vs ${assignment_cost:.2f} on assignment."
+            )
+            next_action = (
+                f"Roll to ${best_roll.strike:.2f} put "
+                f"expiring {best_roll.expiration}."
+            )
+        else:
+            explanation = (
+                f"Roll up to ${best_roll.strike:.2f} for "
+                f"${best_roll.roll_credit:.2f} net credit, "
+                f"raising exit price."
+            )
+            next_action = (
+                f"Roll to ${best_roll.strike:.2f} call "
+                f"expiring {best_roll.expiration}."
+            )
+        return {
+            "recommendation": "ROLL",
+            "explanation": explanation,
+            "next_action": next_action,
+            "assignment_cost": assignment_cost,
+            "new_effective_cost": new_cost,
+        }
+
+    # ASSIGN branch
+    reasons: list[str] = []
+    if not credit_positive:
+        reasons.append("no net credit")
+    if not strike_ok:
+        reasons.append(
+            "new strike is worse"
+            if pos.strategy == "CSP"
+            else "new strike too low"
+        )
+    if pos.strategy == "CSP" and not ownership_improves:
+        reasons.append(
+            f"effective cost ${new_cost:.2f} does not improve "
+            f"on assignment ${assignment_cost:.2f}"
+        )
+
+    if pos.strategy == "CSP":
+        explanation = (
+            f"Assignment at ${pos.strike:.2f} gives cost "
+            f"${assignment_cost:.2f}. Roll rejected — "
+            + "; ".join(reasons) + "."
+        )
+        next_action = (
+            f"Accept assignment at ${pos.strike:.2f}. "
+            f"Sell a covered call above ${pos.strike:.2f}."
+        )
+    else:
+        explanation = (
+            f"Let shares be called away at ${pos.strike:.2f}. "
+            f"Roll rejected — " + "; ".join(reasons) + "."
+        )
+        next_action = (
+            f"Let shares be called away at ${pos.strike:.2f}. "
+            f"Start a new CSP cycle."
+        )
+
+    return {
+        "recommendation": "ASSIGN",
+        "explanation": explanation,
+        "next_action": next_action,
+        "assignment_cost": assignment_cost,
+        "new_effective_cost": new_cost,
+    }
+
+
 def find_best_roll_for_premium(
     roll_candidates: list[RollCandidate],
     pos: OpenPosition,

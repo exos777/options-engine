@@ -14,6 +14,8 @@ from scoring.position_decision import (
     RollCandidate,
     evaluate_position,
     find_best_roll_for_premium,
+    new_effective_cost,
+    roll_vs_assign_verdict,
 )
 from strategies.models import (
     ChartRegime,
@@ -201,12 +203,9 @@ def render_position_manager(dp=None) -> None:
             step=1.0, key="pm_strike",
         )
         original_premium = st.number_input(
-            "Original Premium Collected ($)", min_value=0.0,
+            "Original Premium ($)", min_value=0.0,
             value=4.50, step=0.10, key="pm_premium",
-        )
-        total_premium = st.number_input(
-            "Total Premium Collected ($)", min_value=0.0,
-            value=4.50, step=0.10, key="pm_total_prem",
+            help="Premium collected when this short was opened",
         )
         times_rolled = st.number_input(
             "Times Rolled", min_value=0, max_value=10,
@@ -353,7 +352,7 @@ def render_position_manager(dp=None) -> None:
             current_ask=current_ask,
             close_price_mode=close_mode,
             times_rolled=times_rolled,
-            total_premium_collected=total_premium,
+            total_premium_collected=original_premium,
             desired_buy_price=desired_buy,
             cost_basis=cost_basis,
         )
@@ -572,78 +571,87 @@ def _render_best_roll_card(
     pos: OpenPosition,
 ) -> None:
     st.markdown("---")
+
+    verdict = roll_vs_assign_verdict(pos, best_roll)
+
     if best_roll is None:
         st.warning(
             "\U0001f504 No profitable roll found. "
-            "No candidates generate meaningful credit. "
-            "Consider accepting assignment or closing."
+            "No candidates generate meaningful credit."
         )
+        _render_simple_verdict(verdict)
         return
 
-    st.markdown(
-        '<div style="'
-        "background:#161b22;"
-        "border:1px solid #30363d;"
-        "border-left:4px solid #58a6ff;"
-        "border-radius:8px;"
-        "padding:16px;"
-        'margin:8px 0;">',
-        unsafe_allow_html=True,
-    )
-    st.markdown("### \U0001f504 Best Roll for Maximum Premium")
+    st.markdown("### \U0001f504 Best Roll — Roll Math")
 
-    col1, col2, col3, col4 = st.columns(4)
-    with col1:
-        direction = "Down" if best_roll.strike < pos.strike else "Out"
+    new_cost = new_effective_cost(pos, best_roll)
+
+    c1, c2, c3, c4, c5 = st.columns(5)
+    with c1:
+        st.metric("Original Premium", f"${pos.original_premium:.2f}")
+    with c2:
+        st.metric("Cost to Close", f"${pos.close_cost:.2f}")
+    with c3:
+        st.metric("Net Roll Credit", f"${best_roll.roll_credit:.2f}")
+    with c4:
+        direction = "Down" if best_roll.strike < pos.strike else (
+            "Up" if best_roll.strike > pos.strike else "Same"
+        )
         st.metric(
-            "Roll Strike",
+            "New Strike",
             f"${best_roll.strike:.2f}",
-            direction,
+            f"{direction} · {best_roll.dte} DTE",
         )
-    with col2:
+    with c5:
         st.metric(
-            "Expiration",
-            best_roll.expiration,
-            f"{best_roll.dte} DTE",
-        )
-    with col3:
-        st.metric(
-            "Net Roll Credit",
-            f"${best_roll.roll_credit:.2f}",
-            "per contract",
-        )
-    with col4:
-        new_net = (
-            best_roll.strike
-            - pos.total_premium_collected
-            - best_roll.roll_credit
-        )
-        st.metric(
-            "New Net Cost if Assigned",
-            f"${new_net:.2f}",
-            f"vs current ${pos.net_assigned_cost:.2f}",
+            "New Effective Cost",
+            f"${new_cost:.2f}",
+            f"vs assign ${verdict['assignment_cost']:.2f}",
         )
 
     st.caption(
-        f"Close current: ${pos.close_cost:.2f} · "
         f"New premium: ${best_roll.mid:.2f} · "
         f"Delta: {best_roll.delta:.2f} · "
         f"OI: {best_roll.open_interest} · "
-        f"Spread: {best_roll.spread_pct * 100:.1f}%"
+        f"Spread: {best_roll.spread_pct * 100:.1f}% · "
+        f"Exp: {best_roll.expiration}"
     )
 
-    option_word = "put" if pos.strategy == "CSP" else "call"
-    action = (
-        f"Buy back ${pos.strike:.2f} {option_word} "
-        f"for ${pos.close_cost:.2f}. "
-        f"Sell ${best_roll.strike:.2f} {option_word} "
-        f"expiring {best_roll.expiration} "
-        f"for ${best_roll.mid:.2f}. "
-        f"Net credit: ${best_roll.roll_credit:.2f}."
-    )
-    st.info(f"➡️ {action}")
+    _render_simple_verdict(verdict)
 
-    st.markdown("</div>", unsafe_allow_html=True)
+
+def _render_simple_verdict(verdict: dict) -> None:
+    rec = verdict["recommendation"]
+    if rec == "ROLL":
+        color = "#58a6ff"
+        icon = "\U0001f504"
+    else:
+        color = "#d29922"
+        icon = "\U0001f4cc"
+
+    st.markdown(
+        (
+            '<div style="'
+            "background:#161b22;"
+            "border:1px solid #30363d;"
+            f"border-left:4px solid {color};"
+            "border-radius:8px;"
+            "padding:14px 16px;"
+            'margin:8px 0;">'
+            f'<div style="font-size:18px;font-weight:700;color:{color};">'
+            f"{icon} Recommendation: {rec}"
+            "</div>"
+            '<div style="font-size:14px;color:#e6edf3;margin-top:6px;">'
+            f"{verdict['explanation'].replace('$', '&#36;')}"
+            "</div>"
+            '<div style="font-size:13px;color:#8b949e;margin-top:6px;">'
+            f"<b>Next action:</b> "
+            f"{verdict['next_action'].replace('$', '&#36;')}"
+            "</div>"
+            "</div>"
+        ),
+        unsafe_allow_html=True,
+    )
 
 
 def _find_best_immediate_cc(

@@ -69,9 +69,11 @@ class RollCandidate:
     mid: float
     delta: float
     open_interest: int
-    roll_credit: float
+    roll_credit: float       # sell_to_open - buy_to_close
     roll_type: str
     spread_pct: float = 0.0
+    buy_to_close: float = 0.0   # price paid to close the current short (current ask)
+    sell_to_open: float = 0.0   # price received to open the new short (new bid)
 
 
 @dataclass
@@ -576,12 +578,33 @@ def new_effective_cost(
     candidate: RollCandidate,
 ) -> float:
     """
-    New Effective Cost = new strike - (original premium + net roll credit).
+    CSP: new effective cost if the rolled short is assigned.
 
-    Intentionally uses only original_premium — no lifetime total tracking —
-    to keep the math simple for the current roll decision.
+        new_effective_cost = new_strike - original_premium - net_roll_credit
+
+    where net_roll_credit = sell_to_open - buy_to_close.
+
+    Uses only original_premium — no lifetime total tracking — so the math
+    reflects the current roll in isolation.
     """
     return candidate.strike - pos.original_premium - candidate.roll_credit
+
+
+def new_exit_profit(
+    pos: OpenPosition,
+    candidate: RollCandidate,
+) -> float:
+    """
+    CC: profit per share if the rolled short call is assigned (shares called away).
+
+        new_exit_profit = new_strike - cost_basis + original_premium + net_roll_credit
+    """
+    return (
+        candidate.strike
+        - pos.cost_basis
+        + pos.original_premium
+        + candidate.roll_credit
+    )
 
 
 def roll_vs_assign_verdict(
@@ -625,15 +648,27 @@ def roll_vs_assign_verdict(
 
     new_cost = new_effective_cost(pos, best_roll)
 
-    credit_positive = best_roll.roll_credit > 0
+    # Strike improvement threshold: 2% move in the favorable direction
     if pos.strategy == "CSP":
         strike_ok = best_roll.strike <= pos.strike
+        big_strike_improve = best_roll.strike <= pos.strike * 0.98
         ownership_improves = new_cost < assignment_cost
     else:
         strike_ok = best_roll.strike >= pos.strike
+        big_strike_improve = best_roll.strike >= pos.strike * 1.02
         ownership_improves = True
 
-    should_roll = credit_positive and strike_ok and ownership_improves
+    # Credit gate: positive credit, or a small debit (<$0.25) with a real
+    # strike improvement.
+    credit_positive = best_roll.roll_credit > 0
+    small_debit_ok = (
+        best_roll.roll_credit < 0
+        and abs(best_roll.roll_credit) < 0.25
+        and big_strike_improve
+    )
+    credit_ok = credit_positive or small_debit_ok
+
+    should_roll = credit_ok and strike_ok and ownership_improves
 
     if should_roll:
         if pos.strategy == "CSP":
@@ -667,8 +702,14 @@ def roll_vs_assign_verdict(
 
     # ASSIGN branch
     reasons: list[str] = []
-    if not credit_positive:
-        reasons.append("no net credit")
+    if not credit_ok:
+        if best_roll.roll_credit < 0:
+            reasons.append(
+                f"net debit ${abs(best_roll.roll_credit):.2f} without "
+                "enough strike improvement"
+            )
+        else:
+            reasons.append("no net credit")
     if not strike_ok:
         reasons.append(
             "new strike is worse"
@@ -766,15 +807,25 @@ def find_best_roll_for_premium(
     """
     valid: list[RollCandidate] = []
     for c in roll_candidates:
-        if c.roll_credit <= 0.20:
-            continue
         if c.spread_pct > 0.15:
             continue
         if pos.strategy == "CSP" and c.strike > pos.strike:
             continue
         if pos.strategy == "CC" and pos.cost_basis > 0 and c.strike < pos.cost_basis:
             continue
-        valid.append(c)
+
+        # Credit gate: meaningful positive credit, OR a small debit
+        # (<$0.25) paired with a real strike improvement (>=2%).
+        if c.roll_credit > 0.20:
+            valid.append(c)
+            continue
+        if c.roll_credit < 0 and abs(c.roll_credit) < 0.25:
+            if pos.strategy == "CSP" and c.strike <= pos.strike * 0.98:
+                valid.append(c)
+                continue
+            if pos.strategy == "CC" and c.strike >= pos.strike * 1.02:
+                valid.append(c)
+                continue
 
     if not valid:
         return None

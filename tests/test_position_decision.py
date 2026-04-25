@@ -18,6 +18,7 @@ from scoring.position_decision import (
     evaluate_position,
     find_best_roll_for_premium,
     new_effective_cost,
+    new_exit_profit,
     roll_vs_assign_verdict,
     verdict_confidence,
 )
@@ -468,6 +469,76 @@ def test_verdict_cc_assign_when_strike_lowered():
     v = roll_vs_assign_verdict(pos, c)
     assert v["recommendation"] == "ASSIGN"
     assert "too low" in v["explanation"].lower()
+
+
+# ── BTC / STO net credit / debit math ─────────
+
+def test_net_credit_formula_positive():
+    # STO = 2.50, BTC = 2.00 -> credit 0.50
+    c = make_roll(buy_to_close=2.00, sell_to_open=2.50, roll_credit=0.50)
+    assert c.sell_to_open - c.buy_to_close == pytest.approx(0.50)
+    assert c.roll_credit == pytest.approx(0.50)
+
+
+def test_net_debit_formula_negative():
+    # STO = 1.80, BTC = 2.00 -> debit -0.20
+    c = make_roll(buy_to_close=2.00, sell_to_open=1.80, roll_credit=-0.20)
+    assert c.sell_to_open - c.buy_to_close == pytest.approx(-0.20)
+    assert c.roll_credit == pytest.approx(-0.20)
+
+
+# ── Outcome formulas ──────────────────────────
+
+def test_new_effective_cost_uses_btc_sto_math():
+    # strike=360, original_premium=4.50, net credit=0.80 -> 354.70
+    pos = make_csp(strike=360, original_premium=4.50)
+    c = make_roll(strike=360, roll_credit=0.80)
+    assert new_effective_cost(pos, c) == pytest.approx(360 - 4.50 - 0.80)
+
+
+def test_new_exit_profit_for_cc():
+    # strike=410, cost_basis=365, original_premium=3.00, credit=0.50
+    # profit = 410 - 365 + 3.00 + 0.50 = 48.50
+    pos = make_cc(strike=400, cost_basis=365.0, original_premium=3.00)
+    c = make_roll(strike=410, roll_credit=0.50)
+    assert new_exit_profit(pos, c) == pytest.approx(48.50)
+
+
+# ── Small-debit-with-strike-improvement ───────
+
+def test_verdict_rolls_small_debit_with_strike_improvement():
+    # CSP: strike=370, small debit -0.10, new strike 362 (-2.2%)
+    pos = make_csp(strike=370, original_premium=4.50)
+    c = make_roll(strike=362, roll_credit=-0.10)
+    v = roll_vs_assign_verdict(pos, c)
+    assert v["recommendation"] == "ROLL"
+
+
+def test_verdict_assigns_big_debit_even_with_strike_improvement():
+    # Debit -0.50 is too big even with strike improvement
+    pos = make_csp(strike=370, original_premium=4.50)
+    c = make_roll(strike=360, roll_credit=-0.50)
+    v = roll_vs_assign_verdict(pos, c)
+    assert v["recommendation"] == "ASSIGN"
+
+
+def test_verdict_assigns_small_debit_without_strike_improvement():
+    # Small debit but strike barely moves (<2%)
+    pos = make_csp(strike=370, original_premium=4.50)
+    c = make_roll(strike=368, roll_credit=-0.10)
+    v = roll_vs_assign_verdict(pos, c)
+    assert v["recommendation"] == "ASSIGN"
+
+
+def test_best_roll_picks_small_debit_with_strike_improvement():
+    pos = make_csp(strike=370, original_premium=4.50)
+    cands = [
+        make_roll(strike=362, roll_credit=-0.10, spread_pct=0.05),  # small debit, big move
+        make_roll(strike=369, roll_credit=-0.05, spread_pct=0.05),  # small debit, tiny move
+    ]
+    best = find_best_roll_for_premium(cands, pos)
+    assert best is not None
+    assert best.strike == 362.0
 
 
 def test_no_exposure_poor_conditions():

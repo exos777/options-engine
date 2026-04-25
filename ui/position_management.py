@@ -14,6 +14,8 @@ from scoring.position_decision import (
     RollCandidate,
     evaluate_position,
     find_best_roll_for_premium,
+    new_effective_cost,
+    new_exit_profit,
     roll_vs_assign_verdict,
     verdict_confidence,
 )
@@ -70,6 +72,7 @@ def _fetch_roll_candidates(
             continue
 
         chain = puts if chain_type == "puts" else calls
+        buy_to_close = pos.current_ask  # pay the ask to close short
         for opt in chain:
             if not (strike_lo <= opt.strike <= strike_hi):
                 continue
@@ -79,10 +82,12 @@ def _fetch_roll_candidates(
             bid = opt.bid
             ask = opt.ask
             spread_pct = (ask - bid) / max(mid, 0.01)
-            roll_credit = mid - pos.close_cost
+
+            sell_to_open = bid  # receive the bid when opening the new short
+            roll_credit = sell_to_open - buy_to_close
 
             if opt.strike < pos.strike:
-                roll_type = "down" if pos.strategy == "CSP" else "down"
+                roll_type = "down"
             elif opt.strike > pos.strike:
                 roll_type = "up"
             else:
@@ -100,6 +105,8 @@ def _fetch_roll_candidates(
                 roll_credit=roll_credit,
                 roll_type=roll_type,
                 spread_pct=spread_pct,
+                buy_to_close=buy_to_close,
+                sell_to_open=sell_to_open,
             ))
     return candidates
 
@@ -418,35 +425,71 @@ def _render_decision(
         unsafe_allow_html=True,
     )
 
-    st.markdown("**Comparison**")
-    assign_col, roll_col = st.columns(2)
-
-    with assign_col:
+    if best_roll is None:
         st.markdown("**\U0001f4cc Assign**")
         st.metric(
             "Cost basis if assigned",
             f"${verdict['assignment_cost']:.2f}",
         )
+        return
 
-    with roll_col:
-        st.markdown("**\U0001f504 Roll**")
-        if best_roll is not None:
-            direction = "Down" if best_roll.strike < pos.strike else (
-                "Up" if best_roll.strike > pos.strike else "Same"
-            )
-            st.metric(
-                "New strike",
-                f"${best_roll.strike:.2f}",
-                f"{direction} · {best_roll.dte} DTE",
-            )
-            st.metric(
-                "Net roll credit",
-                f"${best_roll.roll_credit:.2f}",
-            )
-            new_cost = verdict["new_effective_cost"]
-            st.metric(
-                "New effective cost",
-                f"${new_cost:.2f}" if new_cost is not None else "—",
-            )
+    _render_roll_math_card(pos, best_roll, verdict["assignment_cost"])
+
+
+def _render_roll_math_card(
+    pos: OpenPosition,
+    best_roll: RollCandidate,
+    assignment_cost: float,
+) -> None:
+    btc = best_roll.buy_to_close
+    sto = best_roll.sell_to_open
+    net = sto - btc
+
+    st.markdown("### \U0001f9ee Roll Math")
+
+    cur_col, new_col = st.columns(2)
+
+    with cur_col:
+        st.markdown("**Current Option**")
+        st.metric("Buy to Close", f"${btc:.2f}")
+        st.caption(
+            f"Bid ${pos.current_bid:.2f}  ·  Ask ${pos.current_ask:.2f}"
+        )
+
+    with new_col:
+        st.markdown("**New Option**")
+        st.metric("Sell to Open", f"${sto:.2f}")
+        st.caption(
+            f"Bid ${best_roll.bid:.2f}  ·  Ask ${best_roll.ask:.2f}  ·  "
+            f"Strike ${best_roll.strike:.2f}  ·  Exp {best_roll.expiration}"
+        )
+
+    st.markdown("**Roll Math**")
+    m1, m2, m3 = st.columns(3)
+    with m1:
+        st.metric("Sell to Open", f"${sto:.2f}")
+    with m2:
+        st.metric("Buy to Close", f"${btc:.2f}")
+    with m3:
+        if net >= 0:
+            st.metric("Net Credit", f"+${net:.2f}")
         else:
-            st.caption("No profitable roll available.")
+            st.metric("Net Debit", f"-${abs(net):.2f}")
+
+    # Outcome line
+    st.markdown("**If rolled and later assigned:**")
+    if pos.strategy == "CSP":
+        new_cost = new_effective_cost(pos, best_roll)
+        st.metric(
+            "New Effective Cost",
+            f"${new_cost:.2f}",
+            f"vs assign ${assignment_cost:.2f}",
+            delta_color="inverse" if new_cost > assignment_cost else "normal",
+        )
+    else:
+        profit = new_exit_profit(pos, best_roll)
+        st.metric(
+            "New Exit Profit",
+            f"${profit:.2f}",
+            f"strike ${best_roll.strike:.2f} vs cost basis ${pos.cost_basis:.2f}",
+        )

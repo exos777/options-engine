@@ -5,6 +5,8 @@ Streamlit UI for the Roll vs Assign position management decision engine.
 from __future__ import annotations
 
 from datetime import date
+import json
+import pathlib
 
 import streamlit as st
 
@@ -40,6 +42,66 @@ from strategies.models import (
     SupportResistanceLevel,
     TechnicalIndicators,
 )
+
+
+# ---------------------------------------------------------------------------
+# Form-state persistence
+# ---------------------------------------------------------------------------
+
+_PM_PREFS_PATH = (
+    pathlib.Path(__file__).parent.parent / "data" / "pm_prefs.json"
+)
+
+# Keys that are saved across sessions (all pm_* widget keys).
+_PM_PERSIST_KEYS: list[str] = [
+    "pm_ticker",
+    "pm_strategy",
+    "pm_strike",
+    "pm_premium",
+    "pm_price",
+    "pm_buy_price",
+    "pm_cost_basis",
+    "pm_wants_assign",
+    "pm_keep_shares",
+    "pm_earnings",
+    "pm_leg1_sel",
+    "pm_leg2_sel",
+    "pm_leg1_txt",
+    "pm_leg2_txt",
+]
+
+
+def _load_pm_prefs() -> None:
+    """Restore saved form values into session_state on first page load."""
+    if st.session_state.get("_pm_prefs_loaded"):
+        return
+    st.session_state["_pm_prefs_loaded"] = True
+    if not _PM_PREFS_PATH.exists():
+        return
+    try:
+        prefs = json.loads(_PM_PREFS_PATH.read_text(encoding="utf-8"))
+        for k, v in prefs.items():
+            if k in _PM_PERSIST_KEYS and k not in st.session_state:
+                st.session_state[k] = v
+    except Exception:
+        pass
+
+
+def _save_pm_prefs() -> None:
+    """Persist current form values to disk after every render."""
+    prefs = {
+        k: st.session_state[k]
+        for k in _PM_PERSIST_KEYS
+        if k in st.session_state
+    }
+    try:
+        _PM_PREFS_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _PM_PREFS_PATH.write_text(
+            json.dumps(prefs, default=str, indent=2),
+            encoding="utf-8",
+        )
+    except Exception:
+        pass
 
 
 _REC_COLORS = {
@@ -211,6 +273,8 @@ def _do_fetch(dp, ticker: str, expiration: str, strike: float, strategy: str) ->
 
 
 def render_position_manager(dp=None) -> None:
+    _load_pm_prefs()
+
     st.subheader("\U0001f504 Roll vs Assign Decision Engine")
     st.caption(
         "Evaluate an open CSP or CC position and get a recommendation: "
@@ -467,6 +531,8 @@ def render_position_manager(dp=None) -> None:
             expected_move=expected_move,
             has_earnings=has_earnings,
         )
+
+    _save_pm_prefs()
 
 
 def _conf_color(level: str) -> str:

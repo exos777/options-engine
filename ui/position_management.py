@@ -17,6 +17,7 @@ from data.common import (
 )
 from indicators.support_resistance import find_support_resistance
 from indicators.technical import calculate_indicators
+from scoring.regime import classify_regime
 from scoring.position_decision import (
     OpenPosition,
     RollCandidate,
@@ -394,12 +395,6 @@ def render_position_manager(dp=None) -> None:
             key="pm_earnings",
         )
 
-        regime_choice = st.selectbox(
-            "Chart Regime",
-            [r.value for r in ChartRegime],
-            index=0, key="pm_regime",
-        )
-
     # ── Evaluate ───────────────────────────────────────
     if st.button(
         "\U0001f9e0 Evaluate Position",
@@ -418,17 +413,6 @@ def render_position_manager(dp=None) -> None:
             cost_basis=cost_basis,
         )
 
-        regime = RegimeResult(
-            primary=ChartRegime(regime_choice),
-            secondary=None,
-            description=regime_choice,
-            trade_bias=(
-                "go" if regime_choice in ("Bullish", "Near Support")
-                else "skip" if regime_choice == "Bearish"
-                else "caution"
-            ),
-        )
-
         if dp is not None and ticker and leg2_expiration:
             with st.spinner(f"Fetching {leg2_expiration} roll candidates…"):
                 roll_cands = _fetch_roll_candidates(
@@ -440,6 +424,16 @@ def render_position_manager(dp=None) -> None:
         else:
             roll_cands = []
             indicators_obj, supports, resistances = None, [], []
+
+        if indicators_obj is not None:
+            regime = classify_regime(indicators_obj, supports, resistances)
+        else:
+            regime = RegimeResult(
+                primary=ChartRegime.NEUTRAL,
+                secondary=None,
+                description="Neutral (no chart data)",
+                trade_bias="caution",
+            )
 
         # Expected move from Leg 2 IV * sqrt(Leg 2 DTE / 365) * spot
         if implied_vol > 0 and dte_remaining > 0 and current_price > 0:
@@ -453,8 +447,8 @@ def render_position_manager(dp=None) -> None:
             pos=pos,
             current_price=current_price,
             regime=regime,
-            support_levels=[],
-            resistance_levels=[],
+            support_levels=supports,
+            resistance_levels=resistances,
             roll_candidates=roll_cands,
             next_cc_premium=0.0,
             has_earnings=has_earnings,

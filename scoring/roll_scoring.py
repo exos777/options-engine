@@ -425,7 +425,9 @@ def pick_top_rolls(
                     candidates with |delta| <= SAFE_DELTA_MAX, but ALWAYS
                     falls back to the lowest-delta scored candidate so the
                     Safe slot is never empty when any roll passes filters.
-      aggressive  — highest net credit (closest-to-assignment, max profit).
+      aggressive  — highest net credit among NON-ITM candidates
+                    (closest-to-the-money but still OTM/ATM, for max
+                    income without selling already-ITM contracts).
                     Forced distinct from balanced when an alternative exists.
     """
     if not candidates:
@@ -455,10 +457,25 @@ def pick_top_rolls(
     else:
         safe = min(scored, key=lambda pair: pair[0].delta)[0]
 
-    # Aggressive — highest net credit (closer to assignment = max profit
-    # if it expires worthless). Tiebreak by higher delta, then by score.
+    # Aggressive — highest net credit, but NOT already in-the-money.
+    # CC: strike must be >= spot (above = OTM call). CSP: strike must
+    # be <= spot (below = OTM put). When spot is unknown (0), fall back
+    # to the previous behavior of "any candidate by credit."
+    underlying_price = float(kwargs.get("underlying_price", 0.0) or 0.0)
+    if underlying_price > 0:
+        if pos.strategy == "CC":
+            otm = [(c, s) for c, s in scored if c.strike >= underlying_price]
+        else:  # CSP
+            otm = [(c, s) for c, s in scored if c.strike <= underlying_price]
+    else:
+        otm = list(scored)
+
+    # If filtering removed everything (rare — every candidate is ITM),
+    # fall back to the full set so Aggressive still populates.
+    pool = otm if otm else list(scored)
+
     by_credit = sorted(
-        scored,
+        pool,
         key=lambda pair: (pair[0].roll_credit, pair[0].delta, pair[1].score),
         reverse=True,
     )

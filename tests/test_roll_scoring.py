@@ -217,6 +217,65 @@ def test_safe_falls_back_when_no_low_delta_candidate():
     assert picks.safe.delta == 0.35
 
 
+def test_aggressive_excludes_itm_strikes_for_cc():
+    """Aggressive must not pick an in-the-money strike for a CC,
+    even if its premium is the highest. Spot is $400, so strikes
+    below $400 are ITM and must be skipped."""
+    pos = make_cc(strike=400.0, cost_basis=365.0)
+    # Highest credit, but ITM (strike below spot 400).
+    itm_juicy = make_roll(
+        strike=395, roll_credit=8.00, delta=0.55,
+        open_interest=500, spread_pct=0.04,
+    )
+    # OTM with smaller credit — should win Aggressive.
+    otm_solid = make_roll(
+        strike=405, roll_credit=2.50, delta=0.35,
+        open_interest=500, spread_pct=0.04,
+    )
+    otm_safe = make_roll(
+        strike=420, roll_credit=0.60, delta=0.15,
+        open_interest=500, spread_pct=0.04,
+    )
+    picks = pick_top_rolls(
+        [itm_juicy, otm_solid, otm_safe], pos,
+        underlying_price=400.0,
+    )
+    assert picks.aggressive is not None
+    assert picks.aggressive.strike >= 400.0
+    assert picks.aggressive is otm_solid
+
+
+def test_aggressive_excludes_itm_strikes_for_csp():
+    """For a CSP, ITM means strike above spot. The juiciest premium
+    is on the ITM 375 strike but Aggressive must skip it and pick
+    the highest-credit OTM (≤ spot) candidate instead."""
+    pos = make_csp(strike=370.0, desired_buy_price=365.0)
+    itm_juicy = make_roll(
+        strike=375, roll_credit=8.00, delta=0.55,
+        open_interest=500, spread_pct=0.04,
+    )
+    otm_high_credit = make_roll(
+        strike=368, roll_credit=4.00, delta=0.45,
+        open_interest=500, spread_pct=0.04,
+    )
+    otm_solid = make_roll(
+        strike=365, roll_credit=2.50, delta=0.30,
+        open_interest=500, spread_pct=0.04,
+    )
+    otm_safe = make_roll(
+        strike=355, roll_credit=0.60, delta=0.15,
+        open_interest=500, spread_pct=0.04,
+    )
+    picks = pick_top_rolls(
+        [itm_juicy, otm_high_credit, otm_solid, otm_safe], pos,
+        underlying_price=370.0,
+    )
+    assert picks.aggressive is not None
+    # Core invariant: Aggressive must not be in-the-money.
+    assert picks.aggressive.strike <= 370.0
+    assert picks.aggressive is not itm_juicy
+
+
 def test_aggressive_picks_highest_credit_distinct_from_balanced():
     """Aggressive should pick the highest-credit (closest-to-assignment)
     candidate and differ from Balanced when an alternative exists."""

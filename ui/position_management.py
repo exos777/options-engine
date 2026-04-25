@@ -237,6 +237,8 @@ def _do_fetch(dp, ticker: str, expiration: str, strike: float, strategy: str) ->
     try:
         quote = dp.get_quote(ticker)
         st.session_state["pm_auto_price"] = quote.price
+        # Write to the widget key directly so the field reflects live price.
+        st.session_state["pm_price"] = quote.price
 
         if quote.earnings_date:
             try:
@@ -287,6 +289,19 @@ def render_position_manager(dp=None) -> None:
         ticker = st.text_input(
             "Ticker", value="TSLA", key="pm_ticker",
         ).upper().strip()
+
+    # Auto-populate spot price as soon as the ticker is entered.
+    # This runs on every render but is cheap — one fast_info call —
+    # and is guarded so it only fires when the ticker changes.
+    if dp is not None and ticker:
+        if st.session_state.get("_pm_spot_ticker") != ticker:
+            try:
+                _q = dp.get_quote(ticker)
+                st.session_state["pm_auto_price"] = _q.price
+                st.session_state["pm_price"] = _q.price
+                st.session_state["_pm_spot_ticker"] = ticker
+            except Exception:
+                pass
 
     if dp is not None and ticker:
         try:

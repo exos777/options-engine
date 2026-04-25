@@ -23,6 +23,12 @@ from scoring.position_decision import (
     roll_vs_assign_verdict,
     verdict_confidence,
 )
+from scoring.roll_scoring import (
+    RollPicks,
+    RollScore,
+    format_roll_recommendation,
+    pick_top_rolls,
+)
 from strategies.models import (
     ChartRegime,
     RegimeResult,
@@ -418,9 +424,19 @@ def _render_decision(
     ticker: str = "",
     wants_assignment: bool = False,
 ) -> None:
-    best_roll = find_best_roll_for_premium(decision.roll_candidates, pos)
+    picks = pick_top_rolls(decision.roll_candidates, pos)
+    best_roll = picks.balanced
     verdict = roll_vs_assign_verdict(pos, best_roll)
     confidence = verdict_confidence(pos, best_roll, verdict["recommendation"])
+
+    # If we have a scored roll, replace the verdict's terse explanation
+    # with the richer one that names the contributing factors.
+    if best_roll is not None and verdict["recommendation"] == "ROLL":
+        bal_score = picks.score_by_strike.get(best_roll.strike)
+        if bal_score is not None:
+            verdict["explanation"] = format_roll_recommendation(
+                best_roll, pos, bal_score, bucket="balanced",
+            )
 
     rec = verdict["recommendation"]
     if rec == "ROLL":
@@ -464,6 +480,7 @@ def _render_decision(
         return
 
     _render_roll_math_card(pos, best_roll, verdict["assignment_cost"])
+    _render_roll_alternatives(picks, pos)
 
 
 def _render_roll_math_card(
@@ -523,3 +540,83 @@ def _render_roll_math_card(
             f"${profit:.2f}",
             f"strike ${best_roll.strike:.2f} vs cost basis ${pos.cost_basis:.2f}",
         )
+
+
+def _render_roll_alternatives(picks: RollPicks, pos: OpenPosition) -> None:
+    """Render Safe / Balanced / Aggressive cards in a 3-column row."""
+    if not (picks.safe or picks.balanced or picks.aggressive):
+        return
+
+    st.markdown("---")
+    st.markdown("### \U0001f3af Top 3 Roll Alternatives")
+    if pos.strategy == "CSP":
+        st.caption(
+            "Safe: lower delta / farther OTM · "
+            "Balanced: best risk/reward · "
+            "Aggressive: higher credit, higher assignment risk"
+        )
+    else:
+        st.caption(
+            "Safe: farther OTM / lower call-away risk · "
+            "Balanced: best risk/reward · "
+            "Aggressive: higher premium, higher call-away probability"
+        )
+
+    cols = st.columns(3)
+    bucket_specs = [
+        ("safe", "\U0001f6e1️ Safe", picks.safe, "#3fb950"),
+        ("balanced", "⚖️ Balanced", picks.balanced, "#58a6ff"),
+        ("aggressive", "\U0001f525 Aggressive", picks.aggressive, "#f85149"),
+    ]
+    for col, (bucket, label, cand, color) in zip(cols, bucket_specs):
+        with col:
+            if cand is None:
+                st.markdown(f"**{label}**")
+                st.caption("No qualifying candidate.")
+                continue
+
+            score = picks.score_by_strike.get(cand.strike)
+            score_val = score.score if score else 0.0
+            credit_sign = "+" if cand.roll_credit >= 0 else "-"
+
+            st.markdown(
+                (
+                    '<div style="'
+                    "background:#161b22;"
+                    "border:1px solid #30363d;"
+                    f"border-left:4px solid {color};"
+                    "border-radius:8px;"
+                    'padding:12px 14px;margin-bottom:6px;">'
+                    f'<div style="font-weight:700;color:{color};">'
+                    f"{label}"
+                    "</div>"
+                    '<div style="font-size:13px;color:#8b949e;'
+                    'margin-top:4px;">Score '
+                    f"{score_val:.1f}/100"
+                    "</div>"
+                    "</div>"
+                ),
+                unsafe_allow_html=True,
+            )
+            st.metric(
+                "Strike / DTE",
+                f"${cand.strike:.2f}",
+                f"{cand.dte} DTE · |Δ| {cand.delta:.2f}",
+            )
+            st.metric(
+                "Net " + ("Credit" if cand.roll_credit >= 0 else "Debit"),
+                f"{credit_sign}${abs(cand.roll_credit):.2f}",
+                f"STO ${cand.sell_to_open:.2f} · BTC ${cand.buy_to_close:.2f}",
+            )
+            if pos.strategy == "CSP":
+                st.metric(
+                    "New Effective Cost",
+                    f"${new_effective_cost(pos, cand):.2f}",
+                )
+            else:
+                st.metric(
+                    "New Exit Profit",
+                    f"${new_exit_profit(pos, cand):.2f}",
+                )
+            if score and score.explanation:
+                st.caption(score.explanation)

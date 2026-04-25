@@ -575,25 +575,6 @@ def _render_roll_math_card(
     sto = best_roll.sell_to_open
     net = sto - btc
 
-    st.markdown("### \U0001f9ee Roll Math")
-
-    cur_col, new_col = st.columns(2)
-
-    with cur_col:
-        st.markdown("**Current Option**")
-        st.metric("Buy to Close", f"${btc:.2f}")
-        st.caption(
-            f"Bid ${pos.current_bid:.2f}  ·  Ask ${pos.current_ask:.2f}"
-        )
-
-    with new_col:
-        st.markdown("**New Option**")
-        st.metric("Sell to Open", f"${sto:.2f}")
-        st.caption(
-            f"Bid ${best_roll.bid:.2f}  ·  Ask ${best_roll.ask:.2f}  ·  "
-            f"Strike ${best_roll.strike:.2f}  ·  Exp {best_roll.expiration}"
-        )
-
     st.markdown("**Roll Math**")
     m1, m2, m3 = st.columns(3)
     with m1:

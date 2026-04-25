@@ -420,9 +420,13 @@ def pick_top_rolls(
     """
     Score every candidate and return safe / balanced / aggressive picks.
 
-      balanced    — highest score overall
-      safe        — highest score with |delta| <= 0.20
-      aggressive  — highest score with |delta| > 0.30
+      balanced    — highest composite score overall
+      safe        — lowest |delta| (farthest from assignment). Prefers
+                    candidates with |delta| <= SAFE_DELTA_MAX, but ALWAYS
+                    falls back to the lowest-delta scored candidate so the
+                    Safe slot is never empty when any roll passes filters.
+      aggressive  — highest net credit (closest-to-assignment, max profit).
+                    Forced distinct from balanced when an alternative exists.
     """
     if not candidates:
         return RollPicks()
@@ -436,19 +440,38 @@ def pick_top_rolls(
     if not scored:
         return RollPicks()
 
-    scored.sort(key=lambda pair: pair[1].score, reverse=True)
-    score_by_strike = {c.strike: s for c, s in scored}
+    by_score = sorted(scored, key=lambda pair: pair[1].score, reverse=True)
+    score_by_strike = {c.strike: s for c, s in by_score}
 
-    balanced = scored[0][0]
-    safe_bucket = [(c, s) for c, s in scored if c.delta <= SAFE_DELTA_MAX]
-    agg_bucket = [(c, s) for c, s in scored if c.delta > AGGRESSIVE_DELTA_MIN]
-    safe = safe_bucket[0][0] if safe_bucket else None
-    aggressive = agg_bucket[0][0] if agg_bucket else None
+    # Balanced — top composite score.
+    balanced = by_score[0][0]
+
+    # Safe — lowest delta. Prefer the strict ≤ SAFE_DELTA_MAX bucket
+    # (highest-scored within it); otherwise fall back to the lowest-delta
+    # scored candidate so Safe is always populated.
+    safe_bucket = [(c, s) for c, s in by_score if c.delta <= SAFE_DELTA_MAX]
+    if safe_bucket:
+        safe = safe_bucket[0][0]
+    else:
+        safe = min(scored, key=lambda pair: pair[0].delta)[0]
+
+    # Aggressive — highest net credit (closer to assignment = max profit
+    # if it expires worthless). Tiebreak by higher delta, then by score.
+    by_credit = sorted(
+        scored,
+        key=lambda pair: (pair[0].roll_credit, pair[0].delta, pair[1].score),
+        reverse=True,
+    )
+    aggressive = by_credit[0][0]
+
+    # Force Aggressive to differ from Balanced when there is a runner-up.
+    if aggressive is balanced and len(by_credit) > 1:
+        aggressive = by_credit[1][0]
 
     return RollPicks(
         balanced=balanced,
         safe=safe,
         aggressive=aggressive,
         score_by_strike=score_by_strike,
-        all_scored=scored,
+        all_scored=by_score,
     )

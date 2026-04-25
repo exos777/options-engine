@@ -204,6 +204,41 @@ def test_pick_top_rolls_handles_empty():
     assert pick_top_rolls([], pos).balanced is None
 
 
+def test_safe_falls_back_when_no_low_delta_candidate():
+    """When every candidate has delta > SAFE_DELTA_MAX (e.g. high-IV
+    names like TSLA), Safe must still surface the lowest-delta one
+    instead of being blank."""
+    pos = make_csp()
+    a = make_roll(strike=372, roll_credit=1.05, delta=0.42)
+    b = make_roll(strike=370, roll_credit=0.80, delta=0.35)
+    picks = pick_top_rolls([a, b], pos)
+    assert picks.safe is not None
+    # Lowest delta wins the Safe slot.
+    assert picks.safe.delta == 0.35
+
+
+def test_aggressive_picks_highest_credit_distinct_from_balanced():
+    """Aggressive should pick the highest-credit (closest-to-assignment)
+    candidate and differ from Balanced when an alternative exists."""
+    pos = make_csp()
+    # Same composite score is unlikely; rig it so Balanced wins on score
+    # but a different strike has higher credit.
+    cleaner = make_roll(
+        strike=365, roll_credit=0.80, delta=0.20,
+        open_interest=2000, spread_pct=0.02,
+    )
+    juicier = make_roll(
+        strike=370, roll_credit=2.00, delta=0.40,
+        open_interest=400, spread_pct=0.06,
+    )
+    picks = pick_top_rolls([cleaner, juicier], pos)
+    assert picks.aggressive is not None
+    assert picks.balanced is not None
+    assert picks.aggressive is not picks.balanced
+    # Aggressive should be the higher-credit strike.
+    assert picks.aggressive.roll_credit >= picks.balanced.roll_credit
+
+
 def test_pick_top_rolls_skips_rejected():
     pos = make_csp()
     bad = make_roll(spread_pct=0.20)  # rejected

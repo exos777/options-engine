@@ -5,7 +5,7 @@ Shared data utilities used by both provider.py and schwab_provider.py.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 from typing import Optional
 
 import pandas as pd
@@ -71,6 +71,57 @@ def nearest_weekly_expiration(expirations: tuple[str, ...]) -> str:
         return sorted(fridays, key=lambda x: x[1])[0][0].isoformat()
 
     return sorted(candidates, key=lambda x: x[1])[0][0].isoformat()
+
+
+def get_next_weekly_expiration(
+    base_date: str,
+    available_expirations: tuple[str, ...] | list[str],
+) -> Optional[str]:
+    """
+    Return the first expiration in *available_expirations* that is on or
+    after *base_date* + 7 days.
+
+    Used to default the Roll Leg 2 expiration to one week past Leg 1 and
+    snap forward to the next valid weekly when the exact +7 date isn't
+    listed.
+
+    Fallback: if no expiration falls within 14 days of base_date, return
+    the nearest available expiration to base_date+7. Returns None only if
+    *available_expirations* is empty.
+    """
+    if not available_expirations:
+        return None
+
+    try:
+        base = date.fromisoformat(base_date)
+    except (TypeError, ValueError):
+        return None
+
+    target = base + timedelta(days=7)
+    fourteen_days_out = base + timedelta(days=14)
+
+    parsed: list[tuple[date, str]] = []
+    for exp_str in available_expirations:
+        try:
+            parsed.append((date.fromisoformat(exp_str), exp_str))
+        except (TypeError, ValueError):
+            continue
+
+    if not parsed:
+        return None
+
+    # Primary: first expiration >= target_date AND within the 14-day window
+    in_window = [
+        (exp, raw) for exp, raw in parsed
+        if target <= exp <= fourteen_days_out
+    ]
+    if in_window:
+        in_window.sort(key=lambda p: p[0])
+        return in_window[0][1]
+
+    # Fallback: closest expiration to target by absolute distance
+    parsed.sort(key=lambda p: abs((p[0] - target).days))
+    return parsed[0][1]
 
 
 def days_to_expiration(expiration: str) -> int:

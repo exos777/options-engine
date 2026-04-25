@@ -8,7 +8,11 @@ from datetime import date
 
 import streamlit as st
 
-from data.common import days_to_expiration, get_selected_contract
+from data.common import (
+    days_to_expiration,
+    get_next_weekly_expiration,
+    get_selected_contract,
+)
 from scoring.position_decision import (
     OpenPosition,
     RollCandidate,
@@ -46,68 +50,64 @@ def _fetch_roll_candidates(
     dp,
     ticker: str,
     pos: OpenPosition,
+    leg2_exp: str,
 ) -> list[RollCandidate]:
-    """Fetch option chains for 7-21 DTE expirations and build RollCandidate list."""
+    """Fetch the Leg 2 option chain and build RollCandidate list."""
     candidates: list[RollCandidate] = []
+    if not leg2_exp:
+        return candidates
+
     try:
-        expirations = dp.get_expirations(ticker)
+        dte = days_to_expiration(leg2_exp)
     except Exception:
         return candidates
 
-    today = date.today()
+    try:
+        calls, puts = dp.get_option_chain(ticker, leg2_exp)
+    except Exception:
+        return candidates
+
+    chain_type = "puts" if pos.strategy == "CSP" else "calls"
+    chain = puts if chain_type == "puts" else calls
     strike_lo = pos.strike * 0.90
     strike_hi = pos.strike * 1.10
-    chain_type = "puts" if pos.strategy == "CSP" else "calls"
+    buy_to_close = pos.current_ask  # pay the ask to close short
 
-    for exp_str in expirations:
-        try:
-            dte = (date.fromisoformat(exp_str) - today).days
-        except Exception:
+    for opt in chain:
+        if not (strike_lo <= opt.strike <= strike_hi):
             continue
-        if not (7 <= dte <= 21):
+        if opt.mid <= 0:
             continue
-        try:
-            calls, puts = dp.get_option_chain(ticker, exp_str)
-        except Exception:
-            continue
+        mid = opt.mid
+        bid = opt.bid
+        ask = opt.ask
+        spread_pct = (ask - bid) / max(mid, 0.01)
 
-        chain = puts if chain_type == "puts" else calls
-        buy_to_close = pos.current_ask  # pay the ask to close short
-        for opt in chain:
-            if not (strike_lo <= opt.strike <= strike_hi):
-                continue
-            if opt.mid <= 0:
-                continue
-            mid = opt.mid
-            bid = opt.bid
-            ask = opt.ask
-            spread_pct = (ask - bid) / max(mid, 0.01)
+        sell_to_open = bid  # receive the bid when opening the new short
+        roll_credit = sell_to_open - buy_to_close
 
-            sell_to_open = bid  # receive the bid when opening the new short
-            roll_credit = sell_to_open - buy_to_close
+        if opt.strike < pos.strike:
+            roll_type = "down"
+        elif opt.strike > pos.strike:
+            roll_type = "up"
+        else:
+            roll_type = "out"
 
-            if opt.strike < pos.strike:
-                roll_type = "down"
-            elif opt.strike > pos.strike:
-                roll_type = "up"
-            else:
-                roll_type = "out"
-
-            candidates.append(RollCandidate(
-                strike=opt.strike,
-                expiration=exp_str,
-                dte=dte,
-                bid=bid,
-                ask=ask,
-                mid=mid,
-                delta=abs(opt.delta) if opt.delta is not None else 0.0,
-                open_interest=opt.open_interest or 0,
-                roll_credit=roll_credit,
-                roll_type=roll_type,
-                spread_pct=spread_pct,
-                buy_to_close=buy_to_close,
-                sell_to_open=sell_to_open,
-            ))
+        candidates.append(RollCandidate(
+            strike=opt.strike,
+            expiration=leg2_exp,
+            dte=dte,
+            bid=bid,
+            ask=ask,
+            mid=mid,
+            delta=abs(opt.delta) if opt.delta is not None else 0.0,
+            open_interest=opt.open_interest or 0,
+            roll_credit=roll_credit,
+            roll_type=roll_type,
+            spread_pct=spread_pct,
+            buy_to_close=buy_to_close,
+            sell_to_open=sell_to_open,
+        ))
     return candidates
 
 
@@ -159,31 +159,55 @@ def render_position_manager(dp=None) -> None:
     )
 
     # ── Ticker + Fetch row ─────────────────────────────
-    col_ticker, col_exp, col_fetch = st.columns([2, 2, 1])
+    col_ticker, col_leg1, col_leg2, col_fetch = st.columns([2, 2, 2, 1])
     with col_ticker:
         ticker = st.text_input(
             "Ticker", value="TSLA", key="pm_ticker",
         ).upper().strip()
-    with col_exp:
-        if dp is not None and ticker:
-            try:
-                exps = dp.get_expirations(ticker)
-                exp_list = list(exps)
-            except Exception:
-                exp_list = []
-        else:
-            exp_list = []
 
+    if dp is not None and ticker:
+        try:
+            exps = dp.get_expirations(ticker)
+            exp_list = list(exps)
+        except Exception:
+            exp_list = []
+    else:
+        exp_list = []
+
+    with col_leg1:
         if exp_list:
             expiration = st.selectbox(
-                "Expiration Date", options=exp_list,
-                index=0, key="pm_expiration_sel",
+                "Leg 1 Expiration Date (current)", options=exp_list,
+                index=0, key="pm_leg1_sel",
             )
         else:
             expiration = st.text_input(
-                "Expiration Date", placeholder="YYYY-MM-DD",
-                key="pm_expiration_txt",
+                "Leg 1 Expiration Date (current)", placeholder="YYYY-MM-DD",
+                key="pm_leg1_txt",
             ).strip()
+
+    # When Leg 1 changes, auto-default Leg 2 = next weekly >= Leg 1 + 7d.
+    # User overrides to Leg 2 stick until Leg 1 changes again.
+    if expiration:
+        prev_leg1 = st.session_state.get("pm_leg1_prev")
+        if prev_leg1 != expiration and exp_list:
+            auto_leg2 = get_next_weekly_expiration(expiration, exp_list)
+            if auto_leg2 is not None:
+                st.session_state["pm_leg2_sel"] = auto_leg2
+            st.session_state["pm_leg1_prev"] = expiration
+
+    with col_leg2:
+        if exp_list:
+            leg2_expiration = st.selectbox(
+                "Leg 2 Expiration Date (new)", options=exp_list,
+                key="pm_leg2_sel",
+            )
+        else:
+            leg2_expiration = st.text_input(
+                "Leg 2 Expiration Date (new)", placeholder="YYYY-MM-DD",
+                key="pm_leg2_txt",
+            ).strip()
+
     with col_fetch:
         st.write("")
         fetch_btn = st.button(
@@ -257,19 +281,23 @@ def render_position_manager(dp=None) -> None:
         implied_vol = float(st.session_state.get("pm_auto_iv", 0.0))
         close_mode = "realistic"
 
-        if expiration:
-            try:
-                dte_remaining = days_to_expiration(expiration)
-            except Exception:
-                dte_remaining = 0
-        else:
+        try:
+            leg1_dte = days_to_expiration(expiration) if expiration else 0
+        except Exception:
+            leg1_dte = 0
+        try:
+            dte_remaining = (
+                days_to_expiration(leg2_expiration) if leg2_expiration else 0
+            )
+        except Exception:
             dte_remaining = 0
 
         st.metric(
             "DTE Remaining",
             f"{dte_remaining} days",
-            help="Auto-calculated from the selected expiration date.",
+            help="Calculated from the Leg 2 expiration (the new option).",
         )
+        st.caption(f"Leg 1 (current): {leg1_dte} DTE")
 
     with col_right:
         current_price = st.number_input(
@@ -343,9 +371,11 @@ def render_position_manager(dp=None) -> None:
             ),
         )
 
-        if dp is not None and ticker:
-            with st.spinner("Fetching roll candidates…"):
-                roll_cands = _fetch_roll_candidates(dp, ticker, pos)
+        if dp is not None and ticker and leg2_expiration:
+            with st.spinner(f"Fetching {leg2_expiration} roll candidates…"):
+                roll_cands = _fetch_roll_candidates(
+                    dp, ticker, pos, leg2_expiration,
+                )
         else:
             roll_cands = []
 

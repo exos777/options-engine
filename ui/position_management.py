@@ -280,7 +280,7 @@ def render_position_manager(dp=None) -> None:
 
     with col_left:
         strategy = st.radio(
-            "Position Type", ["CSP", "CC"],
+            "Position Type", ["CC", "CSP"],
             horizontal=True, key="pm_strategy",
         )
         strike = st.number_input(

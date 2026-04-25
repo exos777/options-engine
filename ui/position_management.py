@@ -8,11 +8,15 @@ from datetime import date
 
 import streamlit as st
 
+import math
+
 from data.common import (
     days_to_expiration,
     get_next_weekly_expiration,
     get_selected_contract,
 )
+from indicators.support_resistance import find_support_resistance
+from indicators.technical import calculate_indicators
 from scoring.position_decision import (
     OpenPosition,
     RollCandidate,
@@ -33,6 +37,7 @@ from strategies.models import (
     ChartRegime,
     RegimeResult,
     SupportResistanceLevel,
+    TechnicalIndicators,
 )
 
 
@@ -50,6 +55,53 @@ def _spread_color(pct: float) -> str:
     if pct <= 0.10:
         return "#d29922"
     return "#f85149"
+
+
+def _fetch_chart_context(
+    dp,
+    ticker: str,
+    current_price: float,
+) -> tuple[
+    "TechnicalIndicators | None",
+    list[SupportResistanceLevel],
+    list[SupportResistanceLevel],
+]:
+    """
+    Fetch ~6 months of OHLCV and derive (indicators, supports, resistances)
+    for the roll scoring engine.
+
+    Cached in session_state per (ticker, today) so we don't refetch on
+    every Streamlit rerun.
+    """
+    if dp is None or not ticker:
+        return None, [], []
+
+    cache_key = f"{ticker}_{date.today().isoformat()}"
+    cache = st.session_state.get("pm_chart_cache", {})
+    if cache_key in cache:
+        return cache[cache_key]
+
+    try:
+        df = dp.get_historical(ticker, months=6)
+    except Exception:
+        cache[cache_key] = (None, [], [])
+        st.session_state["pm_chart_cache"] = cache
+        return None, [], []
+
+    try:
+        indicators = calculate_indicators(df)
+    except Exception:
+        indicators = None
+
+    try:
+        supports, resistances = find_support_resistance(df, current_price)
+    except Exception:
+        supports, resistances = [], []
+
+    result = (indicators, supports, resistances)
+    cache[cache_key] = result
+    st.session_state["pm_chart_cache"] = cache
+    return result
 
 
 def _fetch_roll_candidates(
@@ -382,8 +434,20 @@ def render_position_manager(dp=None) -> None:
                 roll_cands = _fetch_roll_candidates(
                     dp, ticker, pos, leg2_expiration,
                 )
+            indicators_obj, supports, resistances = _fetch_chart_context(
+                dp, ticker, current_price,
+            )
         else:
             roll_cands = []
+            indicators_obj, supports, resistances = None, [], []
+
+        # Expected move from Leg 2 IV * sqrt(Leg 2 DTE / 365) * spot
+        if implied_vol > 0 and dte_remaining > 0 and current_price > 0:
+            expected_move = (
+                current_price * implied_vol * math.sqrt(dte_remaining / 365)
+            )
+        else:
+            expected_move = 0.0
 
         decision = evaluate_position(
             pos=pos,
@@ -403,6 +467,11 @@ def render_position_manager(dp=None) -> None:
         _render_decision(
             decision, pos, current_price, implied_vol, dte_remaining,
             dp=dp, ticker=ticker, wants_assignment=wants_assignment,
+            indicators=indicators_obj,
+            support_levels=supports,
+            resistance_levels=resistances,
+            expected_move=expected_move,
+            has_earnings=has_earnings,
         )
 
 
@@ -423,8 +492,22 @@ def _render_decision(
     dp=None,
     ticker: str = "",
     wants_assignment: bool = False,
+    indicators: TechnicalIndicators | None = None,
+    support_levels: list[SupportResistanceLevel] | None = None,
+    resistance_levels: list[SupportResistanceLevel] | None = None,
+    expected_move: float = 0.0,
+    has_earnings: bool = False,
 ) -> None:
-    picks = pick_top_rolls(decision.roll_candidates, pos)
+    picks = pick_top_rolls(
+        decision.roll_candidates,
+        pos,
+        indicators=indicators,
+        support_levels=support_levels or [],
+        resistance_levels=resistance_levels or [],
+        expected_move=expected_move,
+        underlying_price=current_price,
+        has_earnings=has_earnings,
+    )
     best_roll = picks.balanced
     verdict = roll_vs_assign_verdict(pos, best_roll)
     confidence = verdict_confidence(pos, best_roll, verdict["recommendation"])

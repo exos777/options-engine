@@ -37,17 +37,24 @@ _TIMEOUT_SECONDS = 15
 
 
 def _get_token() -> str:
-    """Resolve the Tradier API token from Streamlit secrets or env vars."""
-    token: Optional[str] = None
+    """Resolve the Tradier API token.
+
+    Priority:
+      1. TRADIER_TOKEN environment variable (Railway, Docker, .env)
+      2. Streamlit secrets (local secrets.toml, Streamlit Cloud)
+    """
+    # Env var is checked first — always works on Railway.
+    token = os.environ.get("TRADIER_TOKEN", "").strip()
+    if token:
+        return token
+    # Fallback: Streamlit secrets (local dev / Streamlit Cloud).
     try:
         import streamlit as st  # type: ignore
         if hasattr(st, "secrets"):
-            token = st.secrets.get("TRADIER_TOKEN")
+            token = (st.secrets.get("TRADIER_TOKEN") or "").strip()
     except Exception:
-        token = None
-    if not token:
-        token = os.environ.get("TRADIER_TOKEN", "")
-    return (token or "").strip()
+        pass
+    return token
 
 
 def tradier_available() -> bool:

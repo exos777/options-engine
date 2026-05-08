@@ -68,16 +68,42 @@ def _ticker(symbol: str) -> yf.Ticker:
     return yf.Ticker(symbol.upper().strip())
 
 
+def _force_yfinance() -> bool:
+    """Allow app/main.py to bypass Tradier when the user picks Yahoo-only."""
+    return os.environ.get("OPTIONS_FORCE_YFINANCE", "").strip() == "1"
+
+
+def _try_tradier(fn_name: str, *args, **kwargs):
+    """
+    Attempt the equivalent function on data.tradier_provider. Returns the
+    Tradier result on success, or None to signal "fall back to yfinance".
+    """
+    if _force_yfinance():
+        return None
+    try:
+        from data import tradier_provider as tp
+        if not tp.tradier_available():
+            return None
+        return getattr(tp, fn_name)(*args, **kwargs)
+    except Exception as e:
+        logger.warning("Tradier %s failed (%s); falling back to yfinance", fn_name, e)
+        return None
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
 def get_quote(symbol: str) -> Quote:
     """
-    Fetch real-time (15-min delayed) quote for *symbol*.
+    Fetch real-time quote for *symbol*. Tradier-first, yfinance-fallback.
 
     Raises ValueError if the ticker is invalid or price data is unavailable.
     """
+    tradier_result = _try_tradier("get_quote", symbol)
+    if tradier_result is not None:
+        return tradier_result
+
     t = _ticker(symbol)
     info = t.fast_info
 
@@ -125,6 +151,10 @@ def get_quote(symbol: str) -> Quote:
 
 def get_expirations(symbol: str) -> tuple[str, ...]:
     """Return all available option expiration dates as ISO strings."""
+    tradier_result = _try_tradier("get_expirations", symbol)
+    if tradier_result is not None:
+        return tradier_result
+
     t = _ticker(symbol)
     exps = t.options
     if not exps:
@@ -144,9 +174,14 @@ def get_option_chain(
     """
     Fetch the full option chain for *symbol* at *expiration*.
 
+    Tradier-first (with full Greeks), yfinance-fallback.
     Returns (calls, puts) as lists of OptionContract.
     Raises ValueError on bad ticker or missing chain.
     """
+    tradier_result = _try_tradier("get_option_chain", symbol, expiration)
+    if tradier_result is not None:
+        return tradier_result
+
     t = _ticker(symbol)
     try:
         chain = t.option_chain(expiration)
@@ -202,10 +237,15 @@ def get_historical(symbol: str, months: int = 6) -> pd.DataFrame:
     """
     Fetch historical daily OHLCV data for *symbol* going back *months* months.
 
+    Tradier-first, yfinance-fallback.
     Returns a DataFrame with columns: Open, High, Low, Close, Volume.
     Index is a DatetimeIndex sorted ascending.
     Raises ValueError if insufficient data is returned.
     """
+    tradier_result = _try_tradier("get_historical", symbol, months=months)
+    if tradier_result is not None:
+        return tradier_result
+
     period = f"{max(1, months)}mo"
     t = _ticker(symbol)
     df = t.history(period=period)

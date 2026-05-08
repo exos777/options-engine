@@ -23,8 +23,8 @@ for _mod_name in list(sys.modules):
 
 import streamlit as st
 
-from config import schwab_available
 from data import provider as _yf_provider
+from data.tradier_provider import tradier_available
 from indicators.technical import calculate_full_indicators
 from indicators.support_resistance import find_support_resistance
 from scoring.regime import classify_regime
@@ -103,56 +103,22 @@ with st.sidebar:
     st.header("⚙️ Settings")
 
     # Data source selector
-    _schwab_ok = schwab_available()
+    _tradier_ok = tradier_available()
     _source_options = [
-        "Auto (Schwab → yfinance fallback)",
-        "Schwab Only",
+        "Auto (Tradier → yfinance fallback)",
+        "Tradier Only",
         "Yahoo Finance Only",
     ]
     _default_source = st.session_state.get("data_source", _source_options[0])
     _idx = _source_options.index(_default_source) if _default_source in _source_options else 0
     data_source = st.sidebar.radio("Data Source", options=_source_options, index=_idx)
 
-    if not _schwab_ok and data_source in (_source_options[0], _source_options[1]):
+    if not _tradier_ok and data_source in (_source_options[0], _source_options[1]):
         st.warning(
-            "Schwab credentials not found. Check Railway environment variables or `.env`. "
-            "Falling back to Yahoo Finance.",
+            "Tradier token not found. Set TRADIER_TOKEN in `.streamlit/secrets.toml` or "
+            "the Railway environment. Falling back to Yahoo Finance.",
             icon="⚠️",
         )
-
-    # Token expiry warning for Schwab users
-    if _schwab_ok and data_source != "Yahoo Finance Only":
-        try:
-            import json as _json
-            from pathlib import Path as _Path
-            from datetime import datetime as _dt
-            _tok_path = _Path(__file__).resolve().parent.parent / "schwab_token.json"
-            _tok_data = None
-            if _tok_path.exists():
-                _tok_data = _json.loads(_tok_path.read_text())
-            else:
-                _tok_env = os.environ.get("SCHWAB_TOKEN_JSON", "").strip()
-                if _tok_env:
-                    _tok_data = _json.loads(_tok_env)
-            if _tok_data:
-                _created = _tok_data.get("creation_timestamp", 0)
-                if _created > 0:
-                    _age_days = (_dt.now().timestamp() - _created) / 86400
-                    _remaining = max(0, 7 - _age_days)
-                    if _remaining < 1:
-                        st.error(
-                            "Schwab token expired or expiring today. "
-                            "Run `schwab_auth.py` to refresh.",
-                            icon="🔐",
-                        )
-                    elif _remaining < 2:
-                        st.warning(
-                            f"Schwab token expires in ~{_remaining:.0f} day. "
-                            "Run `schwab_auth.py` soon to avoid disruption.",
-                            icon="⚠️",
-                        )
-        except Exception:
-            pass
 
     if data_source != st.session_state.get("data_source"):
         st.session_state["data_source"] = data_source
@@ -356,16 +322,29 @@ with st.sidebar:
 # ---------------------------------------------------------------------------
 # Resolve data provider based on sidebar selection
 # ---------------------------------------------------------------------------
-_use_schwab = (
-    _schwab_ok
-    and data_source in ("Auto (Schwab → yfinance fallback)", "Schwab Only")
+# Yahoo-only mode flips a process-wide kill-switch that data/provider.py
+# checks before delegating to Tradier; everything else uses the Tradier-first
+# wrappers in data/provider.py transparently.
+if data_source == "Yahoo Finance Only":
+    os.environ["OPTIONS_FORCE_YFINANCE"] = "1"
+else:
+    os.environ.pop("OPTIONS_FORCE_YFINANCE", None)
+
+_use_tradier = (
+    _tradier_ok
+    and data_source in ("Auto (Tradier → yfinance fallback)", "Tradier Only")
 )
-if _use_schwab:
-    from data import schwab_provider as dp
-    _source_label = "📡 Schwab" if data_source == "Schwab Only" else "📡 Schwab → yfinance"
+if _use_tradier and data_source == "Tradier Only":
+    # Strict: skip the yfinance fallback entirely.
+    from data import tradier_provider as dp
+    _source_label = "📡 Tradier (Live)"
+elif _use_tradier:
+    # Auto: data.provider transparently does Tradier-first / yfinance-fallback.
+    dp = _yf_provider
+    _source_label = "📡 Tradier (Live)"
 else:
     dp = _yf_provider
-    _source_label = "📊 Yahoo Finance"
+    _source_label = "📊 yfinance (Delayed)"
 
 # ---------------------------------------------------------------------------
 # Build FilterParams from sidebar inputs
@@ -613,7 +592,7 @@ with tab_screener:
 
     # Footer
     st.divider()
-    _footer_source = "Schwab (real-time)" if _use_schwab else "Yahoo Finance (15-min delayed)"
+    _footer_source = "Tradier (real-time)" if _use_tradier else "Yahoo Finance (15-min delayed)"
     st.caption(
         f"Data provided by {_footer_source}. "
         "This tool is for educational and informational purposes only. "

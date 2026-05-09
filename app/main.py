@@ -113,10 +113,13 @@ with st.sidebar:
     _idx = _source_options.index(_default_source) if _default_source in _source_options else 0
     data_source = st.sidebar.radio("Data Source", options=_source_options, index=_idx)
 
-    if not _tradier_ok and data_source in (_source_options[0], _source_options[1]):
+    if _tradier_ok:
+        st.success("📡 Tradier connected", icon="✅")
+    elif data_source in (_source_options[0], _source_options[1]):
+        _tok_len = len(os.environ.get("TRADIER_TOKEN", ""))
         st.warning(
-            "Tradier token not found. Set TRADIER_TOKEN in `.streamlit/secrets.toml` or "
-            "the Railway environment. Falling back to Yahoo Finance.",
+            f"Tradier token not found (env TRADIER_TOKEN length={_tok_len}). "
+            "Set TRADIER_TOKEN in Railway environment. Falling back to Yahoo Finance.",
             icon="⚠️",
         )
 

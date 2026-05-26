@@ -236,6 +236,44 @@ def get_option_chain(
     return calls, puts
 
 
+def get_earnings_date(symbol: str) -> Optional[str]:
+    """
+    Best-effort next-earnings date (ISO string) via the Tradier beta
+    fundamentals calendar. Returns None on any failure or if the account
+    tier doesn't include fundamentals — callers must treat None as
+    "unknown", never as "no earnings".
+    """
+    sym = symbol.upper().strip()
+    try:
+        data = _get("/markets/fundamentals/calendars", {"symbols": sym})
+    except Exception:
+        return None
+
+    today = date.today()
+    best: Optional[date] = None
+
+    def _walk(node) -> None:
+        nonlocal best
+        if isinstance(node, dict):
+            ev_type = str(node.get("event_type", node.get("type", ""))).lower()
+            raw_date = node.get("begin_date_time") or node.get("date")
+            if "earnings" in ev_type and raw_date:
+                try:
+                    d = date.fromisoformat(str(raw_date)[:10])
+                    if d >= today and (best is None or d < best):
+                        best = d
+                except ValueError:
+                    pass
+            for v in node.values():
+                _walk(v)
+        elif isinstance(node, list):
+            for v in node:
+                _walk(v)
+
+    _walk(data)
+    return best.isoformat() if best else None
+
+
 def get_historical(symbol: str, months: int = 6) -> pd.DataFrame:
     """
     Fetch daily OHLCV from Tradier for *symbol* going back *months* months.

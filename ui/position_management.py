@@ -682,8 +682,8 @@ def _render_roll_math_card(
 
 
 def _render_roll_alternatives(picks: RollPicks, pos: OpenPosition) -> None:
-    """Render Safe / Balanced / Aggressive cards in a 3-column row."""
-    if not (picks.safe or picks.balanced or picks.aggressive):
+    """Render Safe / Balanced / Premium cards in a 3-column row."""
+    if not (picks.safe or picks.balanced or picks.premium):
         return
 
     st.markdown("---")
@@ -691,21 +691,21 @@ def _render_roll_alternatives(picks: RollPicks, pos: OpenPosition) -> None:
     if pos.strategy == "CSP":
         st.caption(
             "Safe: lower delta / farther OTM · "
-            "Balanced: best risk/reward · "
-            "Aggressive: higher credit, higher assignment risk"
+            "Balanced: best overall · "
+            "Premium: higher credit but still acceptable"
         )
     else:
         st.caption(
             "Safe: farther OTM / lower call-away risk · "
-            "Balanced: best risk/reward · "
-            "Aggressive: higher premium, higher call-away probability"
+            "Balanced: best overall · "
+            "Premium: higher credit but still acceptable"
         )
 
     cols = st.columns(3)
     bucket_specs = [
         ("safe", "\U0001f6e1️ Safe", picks.safe, "#3fb950"),
         ("balanced", "⚖️ Balanced", picks.balanced, "#58a6ff"),
-        ("aggressive", "\U0001f525 Aggressive", picks.aggressive, "#f85149"),
+        ("premium", "\U0001f4b0 Premium", picks.premium, "#f85149"),
     ]
     for col, (bucket, label, cand, color) in zip(cols, bucket_specs):
         with col:

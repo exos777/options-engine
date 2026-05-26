@@ -244,6 +244,8 @@ def score_cash_secured_puts(
     earnings_date: Optional[str] = None,
     expected_move: float = 0.0,
     iv_percentile: Optional[float] = None,
+    min_dte: int = 5,
+    max_dte: int = 21,
 ) -> list[ScoredOption]:
     """
     Score each put option and return a filtered, sorted list of ScoredOption.
@@ -252,10 +254,14 @@ def score_cash_secured_puts(
     When provided, IV rank is computed per-contract using each contract's
     implied_volatility as the current IV reading.  When omitted, iv_rank_score
     defaults to 50 (neutral) so the weight is effectively zeroed out.
+
+    min_dte / max_dte: the allowed DTE window. Defaults to the 5–21 wheel
+    rule; the Daily Scanner's Friday session relaxes min_dte to 0 to score
+    same-week expirations.
     """
-    if dte < 5:
+    if dte < min_dte:
         return []
-    if dte > 21:
+    if dte > max_dte:
         return []
     if iv_percentile is not None and iv_percentile < 25:
         return []

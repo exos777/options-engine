@@ -213,16 +213,22 @@ def score_covered_calls(
     params: FilterParams,
     earnings_date: Optional[str] = None,
     expected_move: float = 0.0,
+    min_dte: int = 5,
+    max_dte: int = 21,
 ) -> list[ScoredOption]:
     """
     Score each call option contract and return a list of ScoredOption,
     filtered by the user's FilterParams constraints.
 
     Contracts that fail hard filters (spread, OI, premium, delta) are excluded.
+
+    min_dte / max_dte: the allowed DTE window. Defaults to the 5–21 wheel
+    rule; the Daily Scanner's Friday session relaxes min_dte to 0 to score
+    same-week expirations.
     """
-    if dte < 5:
+    if dte < min_dte:
         return []
-    if dte > 21:
+    if dte > max_dte:
         return []
 
     # Adaptive weight redistribution: if no cost basis, redistribute

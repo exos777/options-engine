@@ -35,6 +35,7 @@ from strategies.models import FilterParams, RiskProfile, Strategy
 from ui.chart import build_price_chart
 from ui import recommendations as rec_ui
 from ui.position_management import render_position_manager
+from ui.scanner import render_scanner
 
 
 # ---------------------------------------------------------------------------
@@ -438,6 +439,10 @@ def run_pipeline(ticker: str, expiration: str, params: FilterParams):
         else indicators.atr_14 * _math.sqrt(max(dte, 1))
     )
 
+    # If user explicitly selected a short-dated expiration, relax the min_dte
+    # guard so strikes are still scored (user chose the expiration intentionally).
+    effective_min_dte = 0 if dte < 5 else 5
+
     if params.strategy == Strategy.COVERED_CALL:
         scored = score_covered_calls(
             calls, quote.price, dte,
@@ -446,6 +451,7 @@ def run_pipeline(ticker: str, expiration: str, params: FilterParams):
             params,
             earnings_date=quote.earnings_date,
             expected_move=expected_move,
+            min_dte=effective_min_dte,
         )
     else:
         scored = score_cash_secured_puts(
@@ -455,6 +461,7 @@ def run_pipeline(ticker: str, expiration: str, params: FilterParams):
             params,
             earnings_date=quote.earnings_date,
             expected_move=expected_move,
+            min_dte=effective_min_dte,
         )
 
     progress.progress(92, text="Building recommendations…")
@@ -549,10 +556,14 @@ hist_df = st.session_state.get("hist_df")
 full_ind = st.session_state.get("full_ind")
 expected_move: float = st.session_state.get("expected_move", 0.0)
 
-tab_screener, tab_position = st.tabs([
-    "\U0001f4ca Options Screener",
-    "\U0001f504 Position Manager",
+tab_scanner, tab_screener, tab_position = st.tabs([
+    "☀️ Daily Scanner",
+    "\U0001f4ca Screener",
+    "\U0001f504 Manage Position",
 ])
+
+with tab_scanner:
+    render_scanner(dp=dp)
 
 with tab_screener:
     if result is None:

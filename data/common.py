@@ -1,5 +1,5 @@
 """
-Shared data utilities used by both provider.py and schwab_provider.py.
+Shared data utilities used by data providers (yfinance, Tradier).
 """
 
 from __future__ import annotations

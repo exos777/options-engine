@@ -21,6 +21,9 @@ htmlcov/
 # Streamlit
 .streamlit/secrets.toml
 
+# User-specific runtime preferences (watchlist, form state)
+data/scanner_prefs.json
+
 # IDE
 .vscode/
 .idea/

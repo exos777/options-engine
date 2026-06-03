@@ -6,6 +6,7 @@ import pandas as pd
 import pytest
 
 from strategies.models import ChartRegime
+import ui.scanner as scanner
 from ui.scanner import (
     DEFAULT_WATCHLIST,
     ScanRow,
@@ -17,8 +18,11 @@ from ui.scanner import (
     _earnings_in_window,
     _effective_score,
     _iv_rank,
+    _load_saved_watchlist,
+    _parse_watchlist,
     _pick_expiration,
     _row_color,
+    _save_watchlist,
 )
 from strategies.models import OptionContract
 
@@ -149,3 +153,39 @@ def test_default_watchlist_is_alphabetical_and_contains_core_names():
     assert DEFAULT_WATCHLIST == sorted(DEFAULT_WATCHLIST)
     for sym in ("TSLA", "NVDA", "MSFT", "SPY", "QQQ", "PLTR"):
         assert sym in DEFAULT_WATCHLIST
+
+
+# ── watchlist parsing ───────────────────────────
+
+def test_parse_watchlist_dedupes_uppercases_and_splits():
+    raw = "tsla, NVDA\nmsft , tsla,, spy"
+    assert _parse_watchlist(raw) == ["TSLA", "NVDA", "MSFT", "SPY"]
+
+
+def test_parse_watchlist_empty_string_yields_empty_list():
+    assert _parse_watchlist("   ") == []
+
+
+# ── watchlist persistence ───────────────────────
+
+def test_save_and_load_watchlist_round_trips(tmp_path, monkeypatch):
+    prefs = tmp_path / "scanner_prefs.json"
+    monkeypatch.setattr(scanner, "_PREFS_PATH", prefs)
+    custom = ["AMD", "PLTR", "SNOW"]
+    _save_watchlist(custom)
+    assert _load_saved_watchlist() == custom
+
+
+def test_load_watchlist_falls_back_to_default_when_missing(tmp_path, monkeypatch):
+    monkeypatch.setattr(scanner, "_PREFS_PATH", tmp_path / "nope.json")
+    assert _load_saved_watchlist() == list(DEFAULT_WATCHLIST)
+
+
+def test_load_watchlist_cleans_dupes_and_falls_back_on_garbage(tmp_path, monkeypatch):
+    prefs = tmp_path / "scanner_prefs.json"
+    monkeypatch.setattr(scanner, "_PREFS_PATH", prefs)
+    prefs.write_text('{"watchlist": ["aapl", "AAPL", " msft "]}', encoding="utf-8")
+    assert _load_saved_watchlist() == ["AAPL", "MSFT"]
+
+    prefs.write_text("not json at all", encoding="utf-8")
+    assert _load_saved_watchlist() == list(DEFAULT_WATCHLIST)

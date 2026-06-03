@@ -15,7 +15,9 @@ results are cached for 5 minutes.
 
 from __future__ import annotations
 
+import json
 import math
+import pathlib
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import date, datetime
@@ -69,6 +71,56 @@ _COLOR_STRONG = ("#0d2a17", "#3fb950")
 _COLOR_OK = ("#2a2410", "#d29922")
 _COLOR_WEAK = ("#2a1416", "#f85149")
 _COLOR_MUTED = ("#1a1a20", "#6e7681")
+
+
+# ---------------------------------------------------------------------------
+# Watchlist persistence (survives reruns, refreshes, and restarts)
+# ---------------------------------------------------------------------------
+
+_PREFS_PATH = (
+    pathlib.Path(__file__).parent.parent / "data" / "scanner_prefs.json"
+)
+
+
+def _load_saved_watchlist() -> list[str]:
+    """Return the persisted watchlist, or the default if none is saved."""
+    try:
+        prefs = json.loads(_PREFS_PATH.read_text(encoding="utf-8"))
+        saved = prefs.get("watchlist")
+        if isinstance(saved, list) and saved:
+            # Keep only clean, de-duplicated symbols.
+            out: list[str] = []
+            for sym in saved:
+                s = str(sym).strip().upper()
+                if s and s not in out:
+                    out.append(s)
+            if out:
+                return out
+    except Exception:
+        pass
+    return list(DEFAULT_WATCHLIST)
+
+
+def _save_watchlist(watchlist: list[str]) -> None:
+    """Persist the watchlist to disk. Best-effort — never raises."""
+    try:
+        _PREFS_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _PREFS_PATH.write_text(
+            json.dumps({"watchlist": watchlist}, indent=2),
+            encoding="utf-8",
+        )
+    except Exception:
+        pass
+
+
+def _parse_watchlist(raw: str) -> list[str]:
+    """Parse a comma/newline-separated string into clean unique symbols."""
+    watchlist: list[str] = []
+    for chunk in raw.replace("\n", ",").split(","):
+        sym = chunk.strip().upper()
+        if sym and sym not in watchlist:
+            watchlist.append(sym)
+    return watchlist
 
 
 # ---------------------------------------------------------------------------
@@ -563,19 +615,24 @@ def _render_controls(dp) -> dict:
             "Min IV rank", 20, 80, 30, step=5, key="scanner_min_iv",
         )
 
+    # Seed the editor from the persisted watchlist on first render, then
+    # let Streamlit's widget state own it for the rest of the session.
+    if "scanner_watchlist_raw" not in st.session_state:
+        st.session_state["scanner_watchlist_raw"] = ", ".join(
+            _load_saved_watchlist()
+        )
+
     watchlist_raw = st.text_area(
         "Watchlist (comma or newline separated)",
-        value=st.session_state.get(
-            "scanner_watchlist_raw", ", ".join(DEFAULT_WATCHLIST),
-        ),
         height=68,
         key="scanner_watchlist_raw",
     )
-    watchlist: list[str] = []
-    for chunk in watchlist_raw.replace("\n", ",").split(","):
-        sym = chunk.strip().upper()
-        if sym and sym not in watchlist:
-            watchlist.append(sym)
+    watchlist = _parse_watchlist(watchlist_raw)
+
+    # Persist whenever the parsed list changes so edits survive restarts.
+    if watchlist and watchlist != st.session_state.get("scanner_watchlist_saved"):
+        _save_watchlist(watchlist)
+        st.session_state["scanner_watchlist_saved"] = watchlist
 
     scan_clicked = st.button(
         "🔄 Scan All",

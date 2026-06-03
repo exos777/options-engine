@@ -43,8 +43,9 @@ from strategies.models import (
 # ---------------------------------------------------------------------------
 
 DEFAULT_WATCHLIST: list[str] = [
-    "TSLA", "NVDA", "MSFT", "AMZN", "META",
-    "AAPL", "GOOG", "NFLX", "AMD", "XOM",
+    "AAPL", "AMD", "AMZN", "GOOG", "INTC",
+    "META", "MSFT", "MU", "NFLX", "NVDA",
+    "PLTR", "QQQ", "SNOW", "SPY", "TSLA",
 ]
 
 # Session → (lo_dte, hi_dte, target_dte) preferred expiration window.

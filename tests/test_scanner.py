@@ -145,6 +145,7 @@ def test_row_color_muted_for_no_trade_and_earnings():
 
 # ── watchlist default ───────────────────────────
 
-def test_default_watchlist_has_ten_tickers():
-    assert len(DEFAULT_WATCHLIST) == 10
-    assert "TSLA" in DEFAULT_WATCHLIST
+def test_default_watchlist_is_alphabetical_and_contains_core_names():
+    assert DEFAULT_WATCHLIST == sorted(DEFAULT_WATCHLIST)
+    for sym in ("TSLA", "NVDA", "MSFT", "SPY", "QQQ", "PLTR"):
+        assert sym in DEFAULT_WATCHLIST

@@ -33,36 +33,38 @@ def _exp(days_out: int) -> str:
     return (date.today() + timedelta(days=days_out)).isoformat()
 
 
-def test_monday_picks_5_to_7_dte_window():
+def test_pick_expiration_picks_nearest_future_date():
+    # Daily-options case: nearest day wins regardless of how many exist.
     exps = [_exp(1), _exp(6), _exp(14), _exp(30)]
-    chosen, dte = _pick_expiration(exps, "Monday")
-    assert chosen == _exp(6)
-    assert dte == 6
-
-
-def test_friday_picks_0_to_3_dte_window():
-    exps = [_exp(1), _exp(6), _exp(14)]
-    chosen, dte = _pick_expiration(exps, "Friday")
+    chosen, dte = _pick_expiration(exps)
     assert chosen == _exp(1)
     assert dte == 1
 
 
-def test_pick_expiration_falls_back_to_closest_when_window_empty():
-    # No expiration in the 5–7 window — should snap to the nearest.
-    exps = [_exp(2), _exp(15)]
-    chosen, dte = _pick_expiration(exps, "Monday")
-    assert chosen == _exp(2)  # closer to target 6 than 15
+def test_pick_expiration_picks_nearest_weekly_when_no_dailies():
+    # Weekly-only case: closest Friday to scan date.
+    exps = [_exp(3), _exp(10), _exp(17)]
+    chosen, dte = _pick_expiration(exps)
+    assert chosen == _exp(3)
+    assert dte == 3
 
 
 def test_pick_expiration_ignores_past_dates():
     exps = [_exp(-3), _exp(6)]
-    chosen, _ = _pick_expiration(exps, "Monday")
+    chosen, _ = _pick_expiration(exps)
     assert chosen == _exp(6)
+
+
+def test_pick_expiration_includes_today_zero_dte():
+    exps = [_exp(0), _exp(7)]
+    chosen, dte = _pick_expiration(exps)
+    assert chosen == _exp(0)
+    assert dte == 0
 
 
 def test_pick_expiration_raises_when_no_future_expirations():
     with pytest.raises(ValueError):
-        _pick_expiration([_exp(-1), _exp(-5)], "Monday")
+        _pick_expiration([_exp(-1), _exp(-5)])
 
 
 # ── _atm_iv ─────────────────────────────────────

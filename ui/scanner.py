@@ -3,11 +3,12 @@ Daily Scanner — the morning watchlist sweep for a pure premium seller.
 
 Answers one question: "Where is the best premium to sell today?"
 
-For every ticker on the watchlist it pulls a live quote, the nearest
-session-appropriate option chain (5–7 DTE Monday mode, 0–3 DTE Friday
-mode), and 6 months of history; runs the existing CSP and CC scoring
-engines; and surfaces the single best strike for each side plus a
-0–100 composite score.
+For every ticker on the watchlist it pulls a live quote, the option
+chain for the expiration closest to today's date (a daily expiration
+if the ticker lists them, otherwise the nearest weekly Friday), and
+6 months of history; runs the existing CSP and CC scoring engines;
+and surfaces the single best strike for each side plus a 0–100
+composite score.
 
 Scanning is parallelised across tickers (I/O-bound Tradier calls) and
 results are cached for 5 minutes.
@@ -49,12 +50,6 @@ DEFAULT_WATCHLIST: list[str] = [
     "META", "MSFT", "MU", "NFLX", "NVDA",
     "PLTR", "QQQ", "SNOW", "SPY", "TSLA",
 ]
-
-# Session → (lo_dte, hi_dte, target_dte) preferred expiration window.
-_SESSION_WINDOWS = {
-    "Monday": (5, 7, 6),
-    "Friday": (0, 3, 1),
-}
 
 _CACHE_TTL_SECONDS = 300
 _MAX_WORKERS = 8
@@ -167,9 +162,14 @@ class ScanRow:
 
 def _pick_expiration(
     expirations: tuple[str, ...] | list[str],
-    session_mode: str,
 ) -> tuple[str, int]:
-    """Pick the expiration closest to the session's preferred DTE window."""
+    """
+    Pick the option expiration closest to today's scan date.
+
+    Tickers with daily expirations resolve to the nearest day; tickers
+    with only weeklies resolve to the closest Friday. We never look past
+    the front expiration — whatever expires soonest is what we scan.
+    """
     today = date.today()
     parsed: list[tuple[str, int]] = []
     for exp in expirations:
@@ -182,10 +182,7 @@ def _pick_expiration(
     if not parsed:
         raise ValueError("No future expirations available.")
 
-    lo, hi, target = _SESSION_WINDOWS.get(session_mode, _SESSION_WINDOWS["Monday"])
-    in_window = [(e, d) for e, d in parsed if lo <= d <= hi]
-    pool = in_window or parsed
-    return min(pool, key=lambda pair: abs(pair[1] - target))
+    return min(parsed, key=lambda pair: pair[1])
 
 
 def _atm_iv(contracts: list[OptionContract], spot: float) -> float:
@@ -245,7 +242,7 @@ def _scan_params(strategy: Strategy) -> FilterParams:
     )
 
 
-def _scan_one(dp, ticker: str, session_mode: str) -> ScanRow:
+def _scan_one(dp, ticker: str) -> ScanRow:
     """Scan a single ticker. Never raises — failures are captured on the row."""
     row = ScanRow(ticker=ticker)
 
@@ -259,10 +256,10 @@ def _scan_one(dp, ticker: str, session_mode: str) -> ScanRow:
     row.change_pct = quote.change_pct
     row.volume = quote.volume
 
-    # 2. Expiration for this session
+    # 2. Nearest expiration to today's scan date
     try:
         expirations = dp.get_expirations(ticker)
-        expiration, dte = _pick_expiration(expirations, session_mode)
+        expiration, dte = _pick_expiration(expirations)
     except Exception as exc:  # noqa: BLE001
         row.error = f"No options ({exc})"
         return row
@@ -307,22 +304,22 @@ def _scan_one(dp, ticker: str, session_mode: str) -> ScanRow:
             earnings_date = None
     row.earnings_warning = _earnings_in_window(earnings_date, expiration)
 
-    # 7. Score both sides. Friday session relaxes the 5-DTE floor.
-    min_dte = 0 if session_mode == "Friday" else 5
-
+    # 7. Score both sides. We've already chosen exactly one expiration —
+    #    the nearest to today — so the DTE-window filters are opened wide
+    #    (0–365) to score whatever that front expiration happens to be.
     csp_scored = score_cash_secured_puts(
         puts, quote.price, dte, indicators, regime,
         supports, resistances, _scan_params(Strategy.CASH_SECURED_PUT),
         earnings_date=earnings_date,
         expected_move=expected_move,
-        min_dte=min_dte,
+        min_dte=0, max_dte=365,
     )
     cc_scored = score_covered_calls(
         calls, quote.price, dte, indicators, regime,
         supports, resistances, _scan_params(Strategy.COVERED_CALL),
         earnings_date=earnings_date,
         expected_move=expected_move,
-        min_dte=min_dte,
+        min_dte=0, max_dte=365,
     )
 
     if csp_scored:
@@ -365,7 +362,6 @@ def _scan_one(dp, ticker: str, session_mode: str) -> ScanRow:
 def scan_watchlist(
     dp,
     tickers: list[str],
-    session_mode: str,
     progress_cb: Optional[Callable[[int, int], None]] = None,
 ) -> list[ScanRow]:
     """Scan every ticker in parallel. Results preserve watchlist order."""
@@ -377,7 +373,7 @@ def scan_watchlist(
     total = len(tickers)
     with ThreadPoolExecutor(max_workers=min(_MAX_WORKERS, total)) as pool:
         futures = {
-            pool.submit(_scan_one, dp, t, session_mode): t for t in tickers
+            pool.submit(_scan_one, dp, t): t for t in tickers
         }
         for done, future in enumerate(as_completed(futures), start=1):
             ticker = futures[future]
@@ -433,7 +429,7 @@ def _cell(label: str, value: str, width: str = "1") -> str:
     )
 
 
-def _render_row(row: ScanRow, friday: bool, eff_score: float) -> None:
+def _render_row(row: ScanRow, eff_score: float) -> None:
     """One scan result: a colour-coded card plus an Action button."""
     bg, border = _row_color(row, eff_score)
     card_col, action_col = st.columns([13, 2])
@@ -457,27 +453,19 @@ def _render_row(row: ScanRow, friday: bool, eff_score: float) -> None:
             f'<span style="color:{change_color};font-size:11px;">'
             f'{row.change_pct * 100:+.1f}%</span>'
         )
-        # Friday session swaps CSP Ann% for weekend theta.
-        if friday:
-            weekend_theta = row.best_csp_theta_day * 2
-            third_label = "Weekend Theta"
-            third_value = (
-                f"${weekend_theta:.2f} over wknd" if weekend_theta else "—"
-            )
-        else:
-            third_label = "CSP Ann%"
-            third_value = (
-                f"{row.best_csp_ann_pct:.1f}%" if row.best_csp_strike else "—"
-            )
+        csp_ann = (
+            f"{row.best_csp_ann_pct:.1f}%" if row.best_csp_strike else "—"
+        )
 
         cells = "".join([
             _cell("Ticker", f"<b>{row.ticker}</b>", "1.1"),
             _cell("Price", price_html, "1.4"),
+            _cell("Exp", f"{row.expiration[5:]} · {row.dte}d", "1.3"),
             _cell("Regime", row.regime_label, "1.4"),
             _cell("IV Rank", f"{row.iv_rank:.0f}", "0.9"),
             _cell("Best CSP", _fmt_strike(row.best_csp_strike), "1.1"),
             _cell("CSP Prem", _fmt_money(row.best_csp_premium), "1.1"),
-            _cell(third_label, third_value, "1.5"),
+            _cell("CSP Ann%", csp_ann, "1.1"),
             _cell("Best CC", _fmt_strike(row.best_cc_strike), "1.1"),
             _cell("CC Prem", _fmt_money(row.best_cc_premium), "1.1"),
             _cell(
@@ -592,25 +580,22 @@ def _render_summary(rows: list[ScanRow], strategy_filter: str) -> None:
 def _render_controls(dp) -> dict:
     """Scanner control panel. Returns the resolved settings + scan trigger."""
     st.markdown("#### 🔍 Scan Controls")
-    c1, c2, c3, c4 = st.columns([1.2, 1.2, 1.3, 1.3])
+    st.caption(
+        "Scans as of today and uses the option expiration closest to "
+        "the scan date (nearest daily, else the closest weekly Friday)."
+    )
+    c1, c2, c3 = st.columns([1.3, 1.3, 1.3])
     with c1:
-        session_mode = st.radio(
-            "Session",
-            options=["Monday", "Friday"],
-            help="Monday → 5–7 DTE expirations · Friday → 0–3 DTE",
-            key="scanner_session",
-        )
-    with c2:
         strategy_filter = st.radio(
             "Strategy",
             options=["Both", "CSP only", "CC only"],
             key="scanner_strategy_filter",
         )
-    with c3:
+    with c2:
         min_score = st.slider(
             "Min score", 40, 80, 60, step=5, key="scanner_min_score",
         )
-    with c4:
+    with c3:
         min_iv_rank = st.slider(
             "Min IV rank", 20, 80, 30, step=5, key="scanner_min_iv",
         )
@@ -643,7 +628,6 @@ def _render_controls(dp) -> dict:
     )
 
     return {
-        "session_mode": session_mode,
         "strategy_filter": strategy_filter,
         "min_score": min_score,
         "min_iv_rank": min_iv_rank,
@@ -668,7 +652,7 @@ def render_scanner(dp=None) -> None:
     cfg = _render_controls(dp)
     st.divider()
 
-    cache_key = (tuple(cfg["watchlist"]), cfg["session_mode"])
+    cache_key = (tuple(cfg["watchlist"]), date.today().isoformat())
     cached_at: Optional[datetime] = st.session_state.get("scanner_scanned_at")
     cached_key = st.session_state.get("scanner_cache_key")
     rows: Optional[list[ScanRow]] = st.session_state.get("scanner_results")
@@ -690,7 +674,7 @@ def render_scanner(dp=None) -> None:
             )
 
         rows = scan_watchlist(
-            dp, cfg["watchlist"], cfg["session_mode"], progress_cb=_bump,
+            dp, cfg["watchlist"], progress_cb=_bump,
         )
         progress.empty()
         st.session_state["scanner_results"] = rows
@@ -722,7 +706,6 @@ def render_scanner(dp=None) -> None:
             r.has_no_trade = False
             r.no_trade_reason = ""
 
-    friday = cfg["session_mode"] == "Friday"
     strategy_filter = cfg["strategy_filter"]
 
     # Sort: tradeable rows by score desc, muted rows last.
@@ -748,7 +731,7 @@ def render_scanner(dp=None) -> None:
     stamp = cached_at.strftime("%I:%M %p").lstrip("0") if cached_at else "—"
     st.caption(
         f"Last scanned: {stamp}  ·  {len(rows)} tickers  ·  "
-        f"session: {cfg['session_mode']} ({'0–3' if friday else '5–7'} DTE)"
+        "nearest expiration to today"
         + (f"  ·  {hidden} below min score hidden" if hidden > 0 else "")
     )
 
@@ -757,7 +740,7 @@ def render_scanner(dp=None) -> None:
         return
 
     for r in visible:
-        _render_row(r, friday, _effective_score(r, strategy_filter))
+        _render_row(r, _effective_score(r, strategy_filter))
 
     st.divider()
     _render_summary(rows, strategy_filter)

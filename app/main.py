@@ -16,7 +16,21 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 # Force-reload all project modules to bust Streamlit Cloud's stale module cache.
 # Without this, cached .pyc from a prior deploy can shadow the current source.
-_PROJECT_PREFIXES = ("scoring.", "indicators.", "data.", "ui.", "strategies.", "greeks.", "config")
+#
+# IMPORTANT: modules that define dataclasses crossing the @st.cache_data
+# boundary (strategies.models → Quote, OptionContract, …) MUST be reloaded
+# FIRST. st.cache_data pickles return values, and pickle verifies that an
+# instance's class *is* the class currently bound in its module. If a
+# provider module is reloaded before strategies.models, it binds the old
+# Quote class while strategies.models holds the new one — pickle then fails
+# with "Cannot serialize the return value (of type strategies.models.Quote)".
+# Reloading models first means every dependent re-binds to the fresh class.
+_MODEL_PREFIXES = ("strategies.",)
+_PROJECT_PREFIXES = ("scoring.", "indicators.", "data.", "ui.", "greeks.", "config")
+
+for _mod_name in list(sys.modules):
+    if any(_mod_name == p or _mod_name.startswith(p) for p in _MODEL_PREFIXES):
+        importlib.reload(sys.modules[_mod_name])
 for _mod_name in list(sys.modules):
     if any(_mod_name == p or _mod_name.startswith(p) for p in _PROJECT_PREFIXES):
         importlib.reload(sys.modules[_mod_name])

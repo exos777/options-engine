@@ -528,9 +528,16 @@ def run_pipeline(ticker: str, expiration: str, params: FilterParams):
 
 auto_run = st.session_state.pop("auto_run", False)
 
-if run_button or auto_run or (
-    ticker_input
-    and ticker_input != st.session_state.get("last_ticker")
+# A blank ticker must never reach the provider — Run Screener used to
+# short-circuit this check and request `?symbol=`, which returns HTTP 400.
+if (run_button or auto_run) and not ticker_input:
+    st.warning("Enter a ticker symbol to run the screener.", icon="👈")
+    st.stop()
+
+if ticker_input and (
+    run_button
+    or auto_run
+    or ticker_input != st.session_state.get("last_ticker")
 ):
     with st.spinner(f"Loading expirations for {ticker_input}…"):
         try:
@@ -544,6 +551,14 @@ if run_button or auto_run or (
                 st.rerun()
         except ValueError as e:
             st.error(f"Could not load expirations: {e}", icon="🚨")
+            st.stop()
+        except Exception as e:  # network / HTTP / provider failure
+            st.error(
+                f"Could not load expirations for '{ticker_input}': {e}\n\n"
+                "Check the ticker symbol, or switch Data Source to "
+                "Yahoo Finance in the sidebar.",
+                icon="🚨",
+            )
             st.stop()
 
 # Resolve the expiration to use

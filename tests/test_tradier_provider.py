@@ -77,6 +77,39 @@ def test_token_fingerprint_none_when_unset(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# Symbol validation
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("blank", ["", "   ", "\t", None])
+def test_clean_symbol_rejects_blank(blank):
+    """A blank ticker must fail locally, not as an opaque HTTP 400."""
+    with pytest.raises(ValueError, match="No ticker symbol"):
+        tp._clean_symbol(blank)
+
+
+@pytest.mark.parametrize("raw,expected", [
+    ("tsla", "TSLA"),
+    ("  msft  ", "MSFT"),
+    ("Spy", "SPY"),
+])
+def test_clean_symbol_normalises(raw, expected):
+    assert tp._clean_symbol(raw) == expected
+
+
+@pytest.mark.parametrize("fn_name", [
+    "get_quote", "get_expirations", "get_option_chain", "get_historical",
+])
+def test_public_api_rejects_blank_symbol_before_network(fn_name):
+    """No request should be issued at all for a blank symbol."""
+    fn = getattr(tp, fn_name)
+    args = ("",) if fn_name != "get_option_chain" else ("", "2026-01-01")
+    with patch.object(tp, "_request") as mock_req:
+        with pytest.raises(ValueError, match="No ticker symbol"):
+            fn(*args)
+    mock_req.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
 # Live status probe
 # ---------------------------------------------------------------------------
 

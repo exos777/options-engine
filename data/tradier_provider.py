@@ -168,6 +168,19 @@ def _get(path: str, params: Optional[dict] = None) -> dict:
     return resp.json() or {}
 
 
+def _clean_symbol(symbol: str) -> str:
+    """
+    Normalise and validate a ticker.
+
+    Raises ValueError on a blank symbol so callers get an actionable
+    message instead of an opaque HTTP 400 from `?symbol=`.
+    """
+    sym = (symbol or "").strip().upper()
+    if not sym:
+        raise ValueError("No ticker symbol provided.")
+    return sym
+
+
 def _as_list(node) -> list:
     """Tradier returns a single-item dict when only one row exists; coerce to list."""
     if node is None:
@@ -183,7 +196,7 @@ def _as_list(node) -> list:
 
 def get_quote(symbol: str) -> Quote:
     """Fetch real-time quote for *symbol*. Raises ValueError on bad ticker."""
-    sym = symbol.upper().strip()
+    sym = _clean_symbol(symbol)
     data = _get("/markets/quotes", {"symbols": sym, "greeks": "false"})
     quotes_node = (data.get("quotes") or {})
     raw = quotes_node.get("quote")
@@ -216,7 +229,7 @@ def get_quote(symbol: str) -> Quote:
 
 def get_expirations(symbol: str) -> tuple[str, ...]:
     """Return all available option expiration dates as ISO strings."""
-    sym = symbol.upper().strip()
+    sym = _clean_symbol(symbol)
     data = _get(
         "/markets/options/expirations",
         {"symbol": sym, "includeAllRoots": "true", "strikes": "false"},
@@ -247,7 +260,7 @@ def get_option_chain(
 
     Returns (calls, puts). Raises ValueError on bad ticker / missing chain.
     """
-    sym = symbol.upper().strip()
+    sym = _clean_symbol(symbol)
     data = _get(
         "/markets/options/chains",
         {"symbol": sym, "expiration": expiration, "greeks": "true"},
@@ -328,7 +341,7 @@ def get_earnings_date(symbol: str) -> Optional[str]:
     tier doesn't include fundamentals — callers must treat None as
     "unknown", never as "no earnings".
     """
-    sym = symbol.upper().strip()
+    sym = _clean_symbol(symbol)
     try:
         data = _get("/markets/fundamentals/calendars", {"symbols": sym})
     except Exception:
@@ -366,7 +379,7 @@ def get_historical(symbol: str, months: int = 6) -> pd.DataFrame:
     Returns a DataFrame indexed by date with columns:
     Open, High, Low, Close, Volume.
     """
-    sym = symbol.upper().strip()
+    sym = _clean_symbol(symbol)
     end = date.today()
     start = end - timedelta(days=max(1, months) * 31)
 

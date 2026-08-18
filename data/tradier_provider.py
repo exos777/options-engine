@@ -125,7 +125,7 @@ def tradier_status() -> tuple[bool, str]:
             )
         if probe.status_code != 200:
             return False, f"Tradier returned HTTP {probe.status_code}."
-    return True, f"Tradier connected (key ...{token[-4:]})."
+    return True, "Tradier connected"
 
 
 def _headers() -> dict:

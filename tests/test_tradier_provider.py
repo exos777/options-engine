@@ -136,7 +136,19 @@ def test_status_ok_on_200():
          patch.object(tp, "_request", return_value=resp):
         ok, msg = tp.tradier_status()
     assert ok is True
-    assert "connected" in msg.lower()
+    assert msg == "Tradier connected"
+
+
+def test_status_success_message_leaks_no_key_material():
+    """The badge is screenshotted — it must not show any part of the key."""
+    resp = type("R", (), {"status_code": 200})()
+    token = "goodtoken123"
+    with patch.object(tp, "_get_token", return_value=token), \
+         patch.object(tp, "_request", return_value=resp):
+        _, msg = tp.tradier_status()
+    assert token not in msg
+    assert token[-4:] not in msg
+    assert "key" not in msg.lower()
 
 
 def test_status_falls_back_to_market_data_probe_on_403():

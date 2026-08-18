@@ -38,7 +38,11 @@ for _mod_name in list(sys.modules):
 import streamlit as st
 
 from data import provider as _yf_provider
-from data.tradier_provider import tradier_available
+from data.tradier_provider import (
+    tradier_available,
+    tradier_status,
+    tradier_token_fingerprint as _tradier_token_fingerprint,
+)
 from indicators.technical import calculate_full_indicators
 from indicators.support_resistance import find_support_resistance
 from scoring.regime import classify_regime
@@ -128,15 +132,28 @@ with st.sidebar:
     _idx = _source_options.index(_default_source) if _default_source in _source_options else 0
     data_source = st.sidebar.radio("Data Source", options=_source_options, index=_idx)
 
-    if _tradier_ok:
-        st.success("📡 Tradier connected", icon="✅")
+    # Validate the token against the live API rather than merely checking
+    # that one is set — a stale key otherwise shows a false "connected"
+    # badge and then 401s on the first real request. Cached per-token so
+    # this costs one call per key, not one per rerun.
+    _tok_fingerprint = _tradier_token_fingerprint()
+    if st.session_state.get("_tradier_probe_key") != _tok_fingerprint:
+        st.session_state["_tradier_probe_key"] = _tok_fingerprint
+        st.session_state["_tradier_probe"] = tradier_status()
+    _tradier_live, _tradier_msg = st.session_state.get(
+        "_tradier_probe", (False, "Not checked.")
+    )
+
+    if _tradier_live:
+        st.success(f"📡 {_tradier_msg}", icon="✅")
     elif data_source in (_source_options[0], _source_options[1]):
-        _tok_len = len(os.environ.get("TRADIER_TOKEN", ""))
         st.warning(
-            f"Tradier token not found (env TRADIER_TOKEN length={_tok_len}). "
-            "Set TRADIER_TOKEN in Railway environment. Falling back to Yahoo Finance.",
+            f"{_tradier_msg} Falling back to Yahoo Finance.",
             icon="⚠️",
         )
+        if st.button("↻ Re-check Tradier", use_container_width=True):
+            st.session_state.pop("_tradier_probe_key", None)
+            st.rerun()
 
     if data_source != st.session_state.get("data_source"):
         st.session_state["data_source"] = data_source
@@ -348,8 +365,11 @@ if data_source == "Yahoo Finance Only":
 else:
     os.environ.pop("OPTIONS_FORCE_YFINANCE", None)
 
+# Gate on the *validated* status, not merely "a token is set". A stale or
+# malformed key would otherwise pass and then 401 on the first request —
+# in "Tradier Only" mode that surfaced as an uncaught traceback.
 _use_tradier = (
-    _tradier_ok
+    _tradier_live
     and data_source in ("Auto (Tradier → yfinance fallback)", "Tradier Only")
 )
 if _use_tradier and data_source == "Tradier Only":

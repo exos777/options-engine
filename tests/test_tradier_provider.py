@@ -30,6 +30,123 @@ def test_tradier_available_true_with_token():
         assert tp.tradier_available() is True
 
 
+# ---------------------------------------------------------------------------
+# Token normalisation
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("raw", [
+    "abc123",
+    "  abc123  ",
+    '"abc123"',
+    "'abc123'",
+    '  "abc123"  ',
+])
+def test_clean_token_strips_whitespace_and_quotes(raw):
+    """
+    TOML requires quotes in secrets.toml but env vars take them literally.
+    Pasting the quoted form into Railway must not produce Bearer "abc123".
+    """
+    assert tp._clean_token(raw) == "abc123"
+
+
+def test_clean_token_preserves_interior_quotes():
+    assert tp._clean_token('ab"cd') == 'ab"cd'
+
+
+def test_clean_token_handles_empty_and_none():
+    assert tp._clean_token("") == ""
+    assert tp._clean_token(None) == ""
+
+
+def test_get_token_strips_quotes_from_env(monkeypatch):
+    monkeypatch.setenv("TRADIER_TOKEN", '"quoted-token"')
+    assert tp._get_token() == "quoted-token"
+
+
+def test_token_fingerprint_is_non_secret(monkeypatch):
+    monkeypatch.setenv("TRADIER_TOKEN", "supersecrettoken9999")
+    fp = tp.tradier_token_fingerprint()
+    assert fp == "20:9999"
+    assert "supersecret" not in fp
+
+
+def test_token_fingerprint_none_when_unset(monkeypatch):
+    monkeypatch.delenv("TRADIER_TOKEN", raising=False)
+    with patch.object(tp, "_get_token", return_value=""):
+        assert tp.tradier_token_fingerprint() == "none"
+
+
+# ---------------------------------------------------------------------------
+# Live status probe
+# ---------------------------------------------------------------------------
+
+def test_status_false_without_token():
+    with patch.object(tp, "_get_token", return_value=""):
+        ok, msg = tp.tradier_status()
+    assert ok is False
+    assert "No TRADIER_TOKEN" in msg
+
+
+def test_status_reports_401_as_rejected():
+    resp = type("R", (), {"status_code": 401})()
+    with patch.object(tp, "_get_token", return_value="badtokenabcd"), \
+         patch.object(tp, "_request", return_value=resp):
+        ok, msg = tp.tradier_status()
+    assert ok is False
+    assert "401" in msg and "abcd" in msg   # last-4 shown, full key not
+    assert "badtokenabcd" not in msg
+
+
+def test_status_ok_on_200():
+    resp = type("R", (), {"status_code": 200})()
+    with patch.object(tp, "_get_token", return_value="goodtoken123"), \
+         patch.object(tp, "_request", return_value=resp):
+        ok, msg = tp.tradier_status()
+    assert ok is True
+    assert "connected" in msg.lower()
+
+
+def test_status_falls_back_to_market_data_probe_on_403():
+    """Market-data-only keys 403 on /user/profile but still work."""
+    profile = type("R", (), {"status_code": 403})()
+    market = type("R", (), {"status_code": 200})()
+    with patch.object(tp, "_get_token", return_value="marketonly99"), \
+         patch.object(tp, "_request", side_effect=[profile, market]):
+        ok, _ = tp.tradier_status()
+    assert ok is True
+
+
+def test_status_reports_network_failure():
+    import requests
+    with patch.object(tp, "_get_token", return_value="tok"), \
+         patch.object(tp, "_request", side_effect=requests.ConnectionError("boom")):
+        ok, msg = tp.tradier_status()
+    assert ok is False
+    assert "Could not reach" in msg
+
+
+def test_request_retries_transport_errors_then_succeeds():
+    import requests
+    resp = type("R", (), {"status_code": 200})()
+    with patch.object(tp, "_get_token", return_value="tok"), \
+         patch.object(tp.time, "sleep"), \
+         patch.object(tp.requests, "get",
+                      side_effect=[requests.ConnectionError("reset"), resp]) as mock_get:
+        out = tp._request("/markets/quotes")
+    assert out is resp
+    assert mock_get.call_count == 2
+
+
+def test_request_does_not_retry_http_status_errors():
+    """A 401 is a real answer — retrying it just wastes time."""
+    resp = type("R", (), {"status_code": 401})()
+    with patch.object(tp, "_get_token", return_value="tok"), \
+         patch.object(tp.requests, "get", return_value=resp) as mock_get:
+        out = tp._request("/markets/quotes")
+    assert out is resp
+    assert mock_get.call_count == 1
+
+
 def test_get_calls_raise_without_token(monkeypatch):
     monkeypatch.delenv("TRADIER_TOKEN", raising=False)
     with patch.object(tp, "_get_token", return_value=""):

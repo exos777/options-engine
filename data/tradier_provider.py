@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from datetime import date, timedelta
 from typing import Optional
 
@@ -34,6 +35,25 @@ logger = logging.getLogger(__name__)
 
 _BASE_URL = "https://api.tradier.com/v1"
 _TIMEOUT_SECONDS = 15
+_MAX_RETRIES = 3
+_RETRY_BACKOFF_SECONDS = 0.75
+
+
+def _clean_token(raw: str) -> str:
+    """
+    Normalise a token value.
+
+    Strips whitespace and any surrounding quotes. Quotes are required by
+    TOML in secrets.toml but are literal characters in an env var — pasting
+    the quoted form into Railway yields `Bearer "abc"` and a 401, so we
+    defend against it here.
+    """
+    token = (raw or "").strip()
+    for quote in ('"', "'"):
+        if len(token) >= 2 and token.startswith(quote) and token.endswith(quote):
+            token = token[1:-1].strip()
+            break
+    return token
 
 
 def _get_token() -> str:
@@ -44,22 +64,68 @@ def _get_token() -> str:
       2. Streamlit secrets (local secrets.toml, Streamlit Cloud)
     """
     # Env var is checked first — always works on Railway.
-    token = os.environ.get("TRADIER_TOKEN", "").strip()
+    token = _clean_token(os.environ.get("TRADIER_TOKEN", ""))
     if token:
         return token
     # Fallback: Streamlit secrets (local dev / Streamlit Cloud).
     try:
         import streamlit as st  # type: ignore
         if hasattr(st, "secrets"):
-            token = (st.secrets.get("TRADIER_TOKEN") or "").strip()
+            token = _clean_token(st.secrets.get("TRADIER_TOKEN") or "")
     except Exception:
         pass
     return token
 
 
 def tradier_available() -> bool:
-    """Return True if a Tradier API token is configured."""
+    """Return True if a Tradier API token is configured (not that it works)."""
     return bool(_get_token())
+
+
+def tradier_token_fingerprint() -> str:
+    """Short non-secret identifier for the active token (cache-key use)."""
+    token = _get_token()
+    return f"{len(token)}:{token[-4:]}" if token else "none"
+
+
+def tradier_status() -> tuple[bool, str]:
+    """
+    Verify the configured token against the live API.
+
+    Returns (ok, message). Unlike tradier_available(), this makes a real
+    request, so a stale or malformed token is reported as broken instead
+    of showing a false "connected" state.
+    """
+    token = _get_token()
+    if not token:
+        return False, "No TRADIER_TOKEN configured."
+    try:
+        resp = _request("/user/profile")
+    except Exception as exc:  # noqa: BLE001 — network/DNS/proxy failure
+        return False, f"Could not reach Tradier ({type(exc).__name__})."
+
+    if resp.status_code == 401:
+        return False, (
+            f"Token rejected (401). The key ending '...{token[-4:]}' "
+            f"({len(token)} chars) is invalid, expired, or was pasted "
+            "with surrounding quotes."
+        )
+    # /user/profile is 404/403 on market-data-only keys — the token itself
+    # is still valid, so confirm with a lightweight market-data call.
+    if resp.status_code != 200:
+        try:
+            probe = _request("/markets/quotes", {"symbols": "AAPL"})
+        except Exception as exc:  # noqa: BLE001
+            return False, f"Could not reach Tradier ({type(exc).__name__})."
+        if probe.status_code == 401:
+            return False, (
+                f"Token rejected (401). The key ending '...{token[-4:]}' "
+                f"({len(token)} chars) is invalid, expired, or was pasted "
+                "with surrounding quotes."
+            )
+        if probe.status_code != 200:
+            return False, f"Tradier returned HTTP {probe.status_code}."
+    return True, f"Tradier connected (key ...{token[-4:]})."
 
 
 def _headers() -> dict:
@@ -69,16 +135,35 @@ def _headers() -> dict:
     }
 
 
+def _request(path: str, params: Optional[dict] = None) -> requests.Response:
+    """
+    GET against the Tradier REST API with retry on transport failures.
+
+    Connection resets are retried (corporate proxies drop TLS handshakes
+    intermittently); HTTP status codes are not — a 401 is a real answer
+    and retrying it just wastes time.
+    """
+    last_exc: Optional[Exception] = None
+    for attempt in range(_MAX_RETRIES):
+        try:
+            return requests.get(
+                f"{_BASE_URL}{path}",
+                headers=_headers(),
+                params=params or {},
+                timeout=_TIMEOUT_SECONDS,
+            )
+        except requests.RequestException as exc:
+            last_exc = exc
+            if attempt < _MAX_RETRIES - 1:
+                time.sleep(_RETRY_BACKOFF_SECONDS * (attempt + 1))
+    raise last_exc  # type: ignore[misc]
+
+
 def _get(path: str, params: Optional[dict] = None) -> dict:
     """GET against the Tradier REST API. Raises on auth/network errors."""
     if not _get_token():
         raise RuntimeError("TRADIER_TOKEN not configured")
-    resp = requests.get(
-        f"{_BASE_URL}{path}",
-        headers=_headers(),
-        params=params or {},
-        timeout=_TIMEOUT_SECONDS,
-    )
+    resp = _request(path, params)
     resp.raise_for_status()
     return resp.json() or {}
 

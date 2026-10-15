@@ -186,15 +186,26 @@ def collect_alerts(ledger: Ledger, live: Optional[dict], profit_target: float) -
 def _render_storage_badge() -> None:
     backend = store.backend_name()
     on_railway = bool(os.getenv("RAILWAY_ENVIRONMENT") or os.getenv("RAILWAY_PROJECT_ID"))
-    if backend == "SQLite" and on_railway:
+    # An explicit OPTIONS_DB_URL means the SQLite file was placed on purpose
+    # (e.g. on a Railway volume); only the default in-container path is lost.
+    configured = bool(os.getenv("OPTIONS_DB_URL") or os.getenv("DATABASE_URL"))
+    if backend == "SQLite" and on_railway and not configured:
         st.error(
             "Saving to a local SQLite file, which Railway wipes on every "
-            "deploy. Add a Postgres database to this Railway project and set "
-            "`DATABASE_URL` on the service so the ledger is kept.",
+            "deploy. Either attach a Volume at `/data` and set "
+            "`OPTIONS_DB_URL=sqlite:////data/options_engine.db`, or add a "
+            "Postgres database and reference its `DATABASE_URL`.",
             icon="⚠️",
         )
     else:
-        st.caption(f"💾 Stored in {backend}")
+        st.caption(f"💾 Stored in {backend} ({_storage_location()})")
+
+
+def _storage_location() -> str:
+    url = store.database_url()
+    if url.startswith("sqlite:///"):
+        return url[len("sqlite:///"):]
+    return url.split("@")[-1]   # host/db only — never show credentials
 
 
 def _render_alerts(alerts: list[Alert], live: Optional[dict]) -> None:

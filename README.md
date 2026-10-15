@@ -68,13 +68,19 @@ Everything the app remembers lives in one database:
 | Where | Backend |
 |---|---|
 | Local | SQLite file `data/options_engine.db` (created automatically, gitignored) |
-| Railway | Postgres, via `DATABASE_URL` |
+| Railway (cheapest) | SQLite on a Railway Volume, via `OPTIONS_DB_URL` |
+| Railway (alternative) | Postgres, via `DATABASE_URL` |
 
-**Railway setup (one time):** in the Railway project click **+ New → Database →
-PostgreSQL**, then on the app service open **Variables → Add Reference** and pick
-the Postgres service's `DATABASE_URL`. Redeploy. The Ledger tab shows
-"💾 Stored in Postgres" when it's connected, and a red warning if the app is
-still on the throwaway SQLite file (Railway wipes it on every deploy).
+Railway wipes the container on every deploy, so pick one (one-time setup):
+
+- **Volume:** right-click the app service → **Attach Volume**, mount path `/data`.
+  Then add the variable `OPTIONS_DB_URL` = `sqlite:////data/options_engine.db`
+  (four slashes) and deploy.
+- **Postgres:** **+ Create → Database → PostgreSQL**, then on the app service
+  **Variables → Add Reference →** the Postgres service's `DATABASE_URL`.
+
+The Ledger tab shows where data is stored ("💾 Stored in …"), and a red warning
+if the app is still on the throwaway in-container SQLite file.
 
 ---
 

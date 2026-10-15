@@ -25,14 +25,21 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 # Quote class while strategies.models holds the new one — pickle then fails
 # with "Cannot serialize the return value (of type strategies.models.Quote)".
 # Reloading models first means every dependent re-binds to the fresh class.
-_MODEL_PREFIXES = ("strategies.",)
-_PROJECT_PREFIXES = ("scoring.", "indicators.", "data.", "ui.", "greeks.", "config")
+_MODEL_PREFIXES = ("strategies.", "portfolio.models")
+_PROJECT_PREFIXES = (
+    "scoring.", "indicators.", "data.", "ui.", "greeks.", "portfolio.", "config",
+)
+
+
+def _matches(name: str, prefixes: tuple[str, ...]) -> bool:
+    return any(name == p or name.startswith(p) for p in prefixes)
+
 
 for _mod_name in list(sys.modules):
-    if any(_mod_name == p or _mod_name.startswith(p) for p in _MODEL_PREFIXES):
+    if _matches(_mod_name, _MODEL_PREFIXES):
         importlib.reload(sys.modules[_mod_name])
 for _mod_name in list(sys.modules):
-    if any(_mod_name == p or _mod_name.startswith(p) for p in _PROJECT_PREFIXES):
+    if _matches(_mod_name, _PROJECT_PREFIXES) and not _matches(_mod_name, _MODEL_PREFIXES):
         importlib.reload(sys.modules[_mod_name])
 
 import streamlit as st
@@ -51,6 +58,8 @@ from scoring.cash_secured_put import score_cash_secured_puts
 from scoring.engine import run_screener
 from strategies.models import FilterParams, RiskProfile, Strategy
 from ui.chart import build_price_chart
+from portfolio.exposure import compute_exposure, max_new_csp_contracts
+from ui import ledger as ledger_ui
 from ui import recommendations as rec_ui
 from ui.position_management import render_position_manager
 from ui.scanner import render_scanner
@@ -209,6 +218,16 @@ with st.sidebar:
     )
     strategy = Strategy(strategy_choice)
 
+    # Shares, basis and premium come from the ledger when this ticker has
+    # an open wheel cycle, so the CC cost-basis hard filter uses real numbers.
+    _ledger_pos = ledger_ui.position_for(ticker_input)
+    _ledger_has_shares = _ledger_pos is not None and _ledger_pos.shares > 0
+    if _ledger_has_shares:
+        st.caption(
+            f"📒 Ledger: {_ledger_pos.shares:,} {ticker_input} shares · "
+            f"adjusted basis ${_ledger_pos.adjusted_basis:,.2f}"
+        )
+
     st.divider()
     st.subheader("Wheel Phase")
 
@@ -229,16 +248,21 @@ with st.sidebar:
         assignment_price_val = st.number_input(
             "Assignment Price ($)",
             min_value=0.0,
-            value=0.0,
+            value=(
+                round(_ledger_pos.avg_share_cost, 2) if _ledger_has_shares else 0.0
+            ),
             step=0.01,
             help="Price you were assigned at",
         )
         total_premium_collected = st.number_input(
             "Total Premium Collected ($)",
             min_value=0.0,
-            value=0.0,
+            value=(
+                round(max(_ledger_pos.net_premium, 0.0) / _ledger_pos.shares, 2)
+                if _ledger_has_shares else 0.0
+            ),
             step=0.01,
-            help="All premium collected so far in this wheel",
+            help="All premium collected so far in this wheel, per share",
         )
         if assignment_price_val > 0:
             effective_basis = assignment_price_val - total_premium_collected
@@ -275,13 +299,21 @@ with st.sidebar:
     st.subheader("Position Details")
 
     if strategy == Strategy.COVERED_CALL:
-        shares_owned = st.number_input("Shares Owned", min_value=0, value=100, step=100)
+        shares_owned = st.number_input(
+            "Shares Owned", min_value=0,
+            value=_ledger_pos.shares if _ledger_has_shares else 100,
+            step=100,
+        )
         cost_basis = st.number_input(
             "Cost Basis per Share ($)",
             min_value=0.0,
-            value=0.0,
+            value=(
+                round(max(_ledger_pos.adjusted_basis, 0.0), 2)
+                if _ledger_has_shares else 0.0
+            ),
             step=0.01,
-            help="Leave 0 to ignore cost basis filtering",
+            help="Leave 0 to ignore cost basis filtering. Pre-filled with "
+                 "the ledger's premium-adjusted basis when available.",
         )
         cost_basis_val = cost_basis if cost_basis > 0 else None
         allow_below_basis = st.checkbox(
@@ -600,19 +632,58 @@ if (run_button or auto_run) and ticker_input and active_expiration:
 # Render results
 # ---------------------------------------------------------------------------
 
+def _render_csp_capacity(result) -> None:
+    """How many contracts of each recommended put fit the ledger's limits."""
+    settings = ledger_ui.load_settings()
+    account = float(settings.get("account_size") or 0)
+    if account <= 0:
+        st.caption(
+            "📒 Set your account size in the Ledger tab to see how many "
+            "contracts fit your exposure limits."
+        )
+        return
+    try:
+        _, ledger = ledger_ui.load_ledger()
+    except Exception:
+        return
+    report = compute_exposure(
+        list(ledger.positions.values()), account,
+        settings["max_ticker_pct"], settings["max_total_pct"],
+    )
+    parts = []
+    for rec in result.recommendations:
+        strike = rec.option.contract.strike
+        n = max_new_csp_contracts(
+            report, result.quote.ticker, strike,
+            settings["max_ticker_pct"], settings["max_total_pct"],
+        )
+        parts.append(f"${strike:g} put → **{n}** contract{'s' if n != 1 else ''}")
+    st.caption(
+        "📒 Capacity within your limits "
+        f"({settings['max_ticker_pct']:.0%}/ticker, "
+        f"{settings['max_total_pct']:.0%} total): " + "  ·  ".join(parts)
+    )
+
+
 result: object = st.session_state.get("result")
 hist_df = st.session_state.get("hist_df")
 full_ind = st.session_state.get("full_ind")
 expected_move: float = st.session_state.get("expected_move", 0.0)
 
-tab_scanner, tab_screener, tab_position = st.tabs([
+tab_scanner, tab_screener, tab_ledger, tab_position = st.tabs([
     "☀️ Daily Scanner",
     "\U0001f4ca Screener",
+    "📒 Ledger",
     "\U0001f504 Manage Position",
 ])
 
 with tab_scanner:
     render_scanner(dp=dp)
+
+# Rendered before Manage Position: the ledger's "Manage" button queues a
+# pre-fill that the position form applies later in this same run.
+with tab_ledger:
+    ledger_ui.render_ledger(dp=dp)
 
 with tab_screener:
     if result is None:
@@ -648,6 +719,8 @@ with tab_screener:
         # C. Recommendations
         st.divider()
         rec_ui.render_recommendations(result, strategy, expected_move=expected_move)
+        if strategy == Strategy.CASH_SECURED_PUT and result.recommendations:
+            _render_csp_capacity(result)
 
         # D. Ranked Option Table
         st.divider()

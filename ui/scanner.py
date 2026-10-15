@@ -21,12 +21,13 @@ import math
 import pathlib
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Callable, Optional
 
 import numpy as np
 import streamlit as st
 
+from data import store
 from data.common import days_to_expiration
 from indicators.support_resistance import find_support_resistance
 from indicators.technical import calculate_full_indicators
@@ -61,6 +62,14 @@ _SCAN_MIN_OI = 50
 _SCAN_MAX_SPREAD = 0.15      # CLAUDE.md hard filter: spread > 15% → no trade
 _SCAN_MIN_PREMIUM = 0.10
 
+# True IV rank needs this many stored daily ATM-IV readings; until then
+# the realised-vol proxy is used and the cell is marked "≈".
+_IV_HISTORY_MIN_POINTS = 20
+_IV_HISTORY_LOOKBACK_DAYS = 365
+
+# Earnings inside this many days are listed under the scan results.
+_EARNINGS_HORIZON_DAYS = 14
+
 # Row background / border colours by score bucket.
 _COLOR_STRONG = ("#0d2a17", "#3fb950")
 _COLOR_OK = ("#2a2410", "#d29922")
@@ -69,41 +78,48 @@ _COLOR_MUTED = ("#1a1a20", "#6e7681")
 
 
 # ---------------------------------------------------------------------------
-# Watchlist persistence (survives reruns, refreshes, and restarts)
+# Watchlist persistence (survives reruns, refreshes, restarts and deploys)
 # ---------------------------------------------------------------------------
 
+_WATCHLIST_PREF = "scanner.watchlist"
+
+# Pre-database location. Still read as a fallback so an existing local
+# watchlist carries over the first time the app runs with the store.
 _PREFS_PATH = (
     pathlib.Path(__file__).parent.parent / "data" / "scanner_prefs.json"
 )
 
 
+def _clean_symbols(saved) -> list[str]:
+    """Keep only clean, de-duplicated, upper-cased symbols."""
+    out: list[str] = []
+    if isinstance(saved, list):
+        for sym in saved:
+            s = str(sym).strip().upper()
+            if s and s not in out:
+                out.append(s)
+    return out
+
+
 def _load_saved_watchlist() -> list[str]:
     """Return the persisted watchlist, or the default if none is saved."""
     try:
-        prefs = json.loads(_PREFS_PATH.read_text(encoding="utf-8"))
-        saved = prefs.get("watchlist")
-        if isinstance(saved, list) and saved:
-            # Keep only clean, de-duplicated symbols.
-            out: list[str] = []
-            for sym in saved:
-                s = str(sym).strip().upper()
-                if s and s not in out:
-                    out.append(s)
-            if out:
-                return out
+        saved = store.get_pref(_WATCHLIST_PREF)
     except Exception:
-        pass
-    return list(DEFAULT_WATCHLIST)
+        saved = None
+    if saved is None:
+        try:
+            prefs = json.loads(_PREFS_PATH.read_text(encoding="utf-8"))
+            saved = prefs.get("watchlist")
+        except Exception:
+            saved = None
+    return _clean_symbols(saved) or list(DEFAULT_WATCHLIST)
 
 
 def _save_watchlist(watchlist: list[str]) -> None:
-    """Persist the watchlist to disk. Best-effort — never raises."""
+    """Persist the watchlist. Best-effort — never raises."""
     try:
-        _PREFS_PATH.parent.mkdir(parents=True, exist_ok=True)
-        _PREFS_PATH.write_text(
-            json.dumps({"watchlist": watchlist}, indent=2),
-            encoding="utf-8",
-        )
+        store.set_pref(_WATCHLIST_PREF, list(watchlist))
     except Exception:
         pass
 
@@ -133,6 +149,8 @@ class ScanRow:
     regime_label: str = "—"
     trade_bias: str = ""
     iv_rank: float = 0.0
+    iv_rank_source: str = "rv"      # "iv" = true IV rank, "rv" = proxy
+    earnings_date: Optional[str] = None
     # Best CSP
     best_csp_strike: Optional[float] = None
     best_csp_premium: float = 0.0
@@ -218,6 +236,42 @@ def _iv_rank(hist_df, atm_iv: float) -> float:
     return max(0.0, min(100.0, rank))
 
 
+def _true_iv_rank(
+    history: list[float], atm_iv: float,
+    min_points: int = _IV_HISTORY_MIN_POINTS,
+) -> Optional[float]:
+    """
+    Classic IV rank 0–100: today's ATM IV within its own trailing range.
+    None until *min_points* past readings exist.
+    """
+    if atm_iv <= 0 or len(history) < min_points:
+        return None
+    values = [v for v in history if v > 0] + [atm_iv]
+    lo, hi = min(values), max(values)
+    if hi <= lo:
+        return 50.0
+    return max(0.0, min(100.0, (atm_iv - lo) / (hi - lo) * 100.0))
+
+
+def _resolve_iv_rank(ticker: str, hist_df, atm_iv: float) -> tuple[float, str]:
+    """
+    Record today's ATM IV, then return (rank, source): the true IV rank
+    when enough history is stored, else the realised-vol proxy.
+    """
+    today = date.today()
+    history: list[float] = []
+    try:
+        since = today - timedelta(days=_IV_HISTORY_LOOKBACK_DAYS)
+        history = [v for d, v in store.iv_history(ticker, since) if d != today]
+        store.record_iv(ticker, today, atm_iv)
+    except Exception:  # noqa: BLE001 — storage is best-effort for scans
+        pass
+    rank = _true_iv_rank(history, atm_iv)
+    if rank is not None:
+        return rank, "iv"
+    return _iv_rank(hist_df, atm_iv), "rv"
+
+
 def _earnings_in_window(earnings_date: Optional[str], expiration: str) -> bool:
     """True if a known earnings date falls on/before the expiration."""
     if not earnings_date:
@@ -288,7 +342,7 @@ def _scan_one(dp, ticker: str) -> ScanRow:
 
     # 5. IV rank + expected move
     atm_iv = _atm_iv(puts + calls, quote.price)
-    row.iv_rank = _iv_rank(hist, atm_iv)
+    row.iv_rank, row.iv_rank_source = _resolve_iv_rank(ticker, hist, atm_iv)
     expected_move = (
         quote.price * atm_iv * math.sqrt(max(dte, 1) / 365)
         if atm_iv > 0
@@ -302,6 +356,7 @@ def _scan_one(dp, ticker: str) -> ScanRow:
             earnings_date = dp.get_earnings_date(ticker)
         except Exception:  # noqa: BLE001
             earnings_date = None
+    row.earnings_date = earnings_date
     row.earnings_warning = _earnings_in_window(earnings_date, expiration)
 
     # 7. Score both sides. We've already chosen exactly one expiration —
@@ -462,7 +517,11 @@ def _render_row(row: ScanRow, eff_score: float) -> None:
             _cell("Price", price_html, "1.4"),
             _cell("Exp", f"{row.expiration[5:]} · {row.dte}d", "1.3"),
             _cell("Regime", row.regime_label, "1.4"),
-            _cell("IV Rank", f"{row.iv_rank:.0f}", "0.9"),
+            _cell(
+                "IV Rank",
+                f"{row.iv_rank:.0f}" + ("" if row.iv_rank_source == "iv" else "≈"),
+                "0.9",
+            ),
             _cell("Best CSP", _fmt_strike(row.best_csp_strike), "1.1"),
             _cell("CSP Prem", _fmt_money(row.best_csp_premium), "1.1"),
             _cell("CSP Ann%", csp_ann, "1.1"),
@@ -575,6 +634,30 @@ def _render_summary(rows: list[ScanRow], strategy_filter: str) -> None:
         st.metric("⚠️ Earnings Warnings", str(earnings_ct))
     with c5:
         st.metric("⛔ No Trade", str(no_trade_ct), "hard filters")
+
+    upcoming = upcoming_earnings(rows)
+    if upcoming:
+        st.markdown(f"##### 📅 Earnings in the next {_EARNINGS_HORIZON_DAYS} days")
+        st.markdown("  ·  ".join(
+            f"**{t}** {d:%a %b %d} ({(d - date.today()).days}d)"
+            for t, d in upcoming
+        ))
+
+
+def upcoming_earnings(
+    rows: list[ScanRow], horizon_days: int = _EARNINGS_HORIZON_DAYS,
+) -> list[tuple[str, date]]:
+    """(ticker, earnings date) for rows reporting within *horizon_days*."""
+    today = date.today()
+    out: list[tuple[str, date]] = []
+    for r in rows:
+        try:
+            ed = date.fromisoformat(r.earnings_date) if r.earnings_date else None
+        except (TypeError, ValueError):
+            ed = None
+        if ed and 0 <= (ed - today).days <= horizon_days:
+            out.append((r.ticker, ed))
+    return sorted(out, key=lambda pair: pair[1])
 
 
 def _render_controls(dp) -> dict:
@@ -734,6 +817,12 @@ def render_scanner(dp=None) -> None:
         "nearest expiration to today"
         + (f"  ·  {hidden} below min score hidden" if hidden > 0 else "")
     )
+    if any(r.iv_rank_source != "iv" for r in rows if not r.error):
+        st.caption(
+            "IV Rank ≈ = estimated from realised volatility. Each scan stores "
+            f"today's implied vol; after {_IV_HISTORY_MIN_POINTS} days of "
+            "history a ticker switches to true IV rank."
+        )
 
     if not visible:
         st.info("No tickers meet the current filters.", icon="🔍")

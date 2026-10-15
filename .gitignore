@@ -23,6 +23,10 @@ htmlcov/
 
 # User-specific runtime preferences (watchlist, form state)
 data/scanner_prefs.json
+data/pm_prefs.json
+
+# Local ledger / preferences database (Postgres is used on Railway)
+data/options_engine.db
 
 # IDE
 .vscode/

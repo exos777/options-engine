@@ -14,6 +14,9 @@ real-time option chain data, technical chart analysis, and a weighted scoring en
 | **Technical Chart** | Candlestick + SMA 20/50 + support/resistance + strike overlays + volume |
 | **Recommendations** | Top 3 strikes labelled Safest Income / Best Balance / Max Premium with plain-English explanations |
 | **Ranked Table** | All qualifying strikes scored and sortable |
+| **Daily Scanner** | Sweeps the watchlist; true IV rank once 20 days of IV history are stored; upcoming earnings |
+| **📒 Ledger** | Wheel journal: open positions, adjusted cost basis, exit alerts, exposure vs account size, premium by month, closed-cycle returns, CSV export |
+| **Manage Position** | Roll vs assign engine; one click from a Ledger position pre-fills it |
 
 **Scoring weights:** Premium · Delta · Liquidity · Chart Alignment · Cost Basis / Buy Price.
 All weights shift by risk profile (Conservative / Balanced / Aggressive).
@@ -58,6 +61,29 @@ The app opens at `http://localhost:8501` in your browser.
 
 ---
 
+## Storage (ledger, watchlist, preferences)
+
+Everything the app remembers lives in one database:
+
+| Where | Backend |
+|---|---|
+| Local | SQLite file `data/options_engine.db` (created automatically, gitignored) |
+| Railway (cheapest) | SQLite on a Railway Volume, via `OPTIONS_DB_URL` |
+| Railway (alternative) | Postgres, via `DATABASE_URL` |
+
+Railway wipes the container on every deploy, so pick one (one-time setup):
+
+- **Volume:** right-click the app service → **Attach Volume**, mount path `/data`.
+  Then add the variable `OPTIONS_DB_URL` = `sqlite:////data/options_engine.db`
+  (four slashes) and deploy.
+- **Postgres:** **+ Create → Database → PostgreSQL**, then on the app service
+  **Variables → Add Reference →** the Postgres service's `DATABASE_URL`.
+
+The Ledger tab shows where data is stored ("💾 Stored in …"), and a red warning
+if the app is still on the throwaway in-container SQLite file.
+
+---
+
 ## Run Tests
 
 ```bash
@@ -78,7 +104,15 @@ options-engine/
 │   └── main.py                  # Streamlit UI entry point
 │
 ├── data/
-│   └── provider.py              # yfinance wrapper (quotes, chains, history)
+│   ├── provider.py              # Tradier-first / yfinance-fallback wrapper
+│   ├── tradier_provider.py      # Tradier REST client
+│   └── store.py                 # Persistence: SQLite locally, Postgres on Railway
+│
+├── portfolio/
+│   ├── models.py                # Trade + TradeAction (ledger rows)
+│   ├── ledger.py                # Trades → wheel cycles, adjusted basis, P&L
+│   ├── alerts.py                # Exit alerts on open shorts
+│   └── exposure.py              # Capital committed vs account limits
 │
 ├── indicators/
 │   ├── technical.py             # SMA, RSI, ATR, composite builder
@@ -95,7 +129,10 @@ options-engine/
 │
 ├── ui/
 │   ├── chart.py                 # Plotly figure builder
-│   └── recommendations.py       # Streamlit rendering helpers
+│   ├── recommendations.py       # Streamlit rendering helpers
+│   ├── scanner.py               # Daily Scanner tab
+│   ├── ledger.py                # Ledger tab
+│   └── position_management.py   # Manage Position tab
 │
 ├── tests/
 │   ├── conftest.py              # Shared fixtures

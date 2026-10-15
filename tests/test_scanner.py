@@ -22,8 +22,12 @@ from ui.scanner import (
     _parse_watchlist,
     _pick_expiration,
     _row_color,
+    _resolve_iv_rank,
     _save_watchlist,
+    _true_iv_rank,
+    upcoming_earnings,
 )
+from data import store
 from strategies.models import OptionContract
 
 
@@ -191,3 +195,55 @@ def test_load_watchlist_cleans_dupes_and_falls_back_on_garbage(tmp_path, monkeyp
 
     prefs.write_text("not json at all", encoding="utf-8")
     assert _load_saved_watchlist() == list(DEFAULT_WATCHLIST)
+
+
+def test_watchlist_persists_in_store_over_legacy_file(tmp_path, monkeypatch):
+    legacy = tmp_path / "scanner_prefs.json"
+    monkeypatch.setattr(scanner, "_PREFS_PATH", legacy)
+    legacy.write_text('{"watchlist": ["AAPL"]}', encoding="utf-8")
+    assert _load_saved_watchlist() == ["AAPL"]       # legacy file carried over
+    _save_watchlist(["NVDA", "AMD"])
+    assert _load_saved_watchlist() == ["NVDA", "AMD"]  # store wins once saved
+
+
+# ── true IV rank from stored history ────────────
+
+def test_true_iv_rank_needs_enough_history():
+    assert _true_iv_rank([0.30] * 5, atm_iv=0.40, min_points=20) is None
+    assert _true_iv_rank([0.30] * 25, atm_iv=0.0) is None
+
+
+def test_true_iv_rank_places_current_iv_in_its_range():
+    history = [0.20 + i * 0.01 for i in range(21)]     # 0.20 … 0.40
+    assert _true_iv_rank(history, atm_iv=0.30) == pytest.approx(50.0)
+    assert _true_iv_rank(history, atm_iv=0.50) == pytest.approx(100.0)
+    assert _true_iv_rank([0.30] * 21, atm_iv=0.30) == 50.0
+
+
+def test_resolve_iv_rank_records_and_switches_to_true_rank():
+    close = pd.Series([100 + (i % 3) * 0.1 for i in range(60)])
+    df = pd.DataFrame({"Close": close})
+
+    rank, source = _resolve_iv_rank("ZZZ", df, 0.30)
+    assert source == "rv"
+    assert store.iv_history("ZZZ", date.today()) == [(date.today(), 0.30)]
+
+    for i in range(1, 21):
+        store.record_iv("ZZZ", date.today() - timedelta(days=i), 0.20 + i * 0.01)
+    rank, source = _resolve_iv_rank("ZZZ", df, 0.30)
+    assert source == "iv"
+    assert rank == pytest.approx((0.30 - 0.21) / (0.40 - 0.21) * 100)
+
+
+# ── upcoming earnings ───────────────────────────
+
+def test_upcoming_earnings_lists_only_horizon_sorted():
+    rows = [
+        ScanRow(ticker="AAA", earnings_date=_exp(10)),
+        ScanRow(ticker="BBB", earnings_date=_exp(3)),
+        ScanRow(ticker="CCC", earnings_date=_exp(30)),
+        ScanRow(ticker="DDD", earnings_date=_exp(-1)),
+        ScanRow(ticker="EEE", earnings_date="garbage"),
+        ScanRow(ticker="FFF"),
+    ]
+    assert [t for t, _ in upcoming_earnings(rows, horizon_days=14)] == ["BBB", "AAA"]

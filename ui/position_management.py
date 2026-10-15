@@ -12,6 +12,7 @@ import streamlit as st
 
 import math
 
+from data import store
 from data.common import (
     days_to_expiration,
     get_next_weekly_expiration,
@@ -45,9 +46,12 @@ from strategies.models import (
 
 
 # ---------------------------------------------------------------------------
-# Form-state persistence
+# Form-state persistence (database-backed, survives Railway redeploys)
 # ---------------------------------------------------------------------------
 
+_PM_PREFS_KEY = "position_manager.form"
+
+# Pre-database location — read once as a fallback so old entries carry over.
 _PM_PREFS_PATH = (
     pathlib.Path(__file__).parent.parent / "data" / "pm_prefs.json"
 )
@@ -70,36 +74,53 @@ _PM_PERSIST_KEYS: list[str] = [
     "pm_leg2_txt",
 ]
 
+# Set by the Ledger tab's "Manage" button; applied before widgets render.
+PM_PREFILL_KEY = "_pm_prefill"
+
 
 def _load_pm_prefs() -> None:
     """Restore saved form values into session_state on first page load."""
     if st.session_state.get("_pm_prefs_loaded"):
         return
     st.session_state["_pm_prefs_loaded"] = True
-    if not _PM_PREFS_PATH.exists():
-        return
     try:
-        prefs = json.loads(_PM_PREFS_PATH.read_text(encoding="utf-8"))
-        for k, v in prefs.items():
-            if k in _PM_PERSIST_KEYS and k not in st.session_state:
-                st.session_state[k] = v
+        prefs = store.get_pref(_PM_PREFS_KEY)
     except Exception:
-        pass
+        prefs = None
+    if prefs is None and _PM_PREFS_PATH.exists():
+        try:
+            prefs = json.loads(_PM_PREFS_PATH.read_text(encoding="utf-8"))
+        except Exception:
+            prefs = None
+    for k, v in (prefs or {}).items():
+        if k in _PM_PERSIST_KEYS and k not in st.session_state:
+            st.session_state[k] = v
+
+
+def _apply_prefill() -> None:
+    """Load a position sent over from the Ledger tab into the form."""
+    prefill = st.session_state.pop(PM_PREFILL_KEY, None)
+    if not prefill:
+        return
+    for k, v in prefill.items():
+        st.session_state[k] = v
+    # Force a fresh quote / live-data fetch for the new contract.
+    st.session_state.pop("_pm_spot_ticker", None)
+    st.session_state.pop("pm_leg1_prev", None)
 
 
 def _save_pm_prefs() -> None:
-    """Persist current form values to disk after every render."""
+    """Persist current form values after every render (only when changed)."""
     prefs = {
         k: st.session_state[k]
         for k in _PM_PERSIST_KEYS
         if k in st.session_state
     }
+    if prefs == st.session_state.get("_pm_prefs_saved"):
+        return
     try:
-        _PM_PREFS_PATH.parent.mkdir(parents=True, exist_ok=True)
-        _PM_PREFS_PATH.write_text(
-            json.dumps(prefs, default=str, indent=2),
-            encoding="utf-8",
-        )
+        store.set_pref(_PM_PREFS_KEY, prefs)
+        st.session_state["_pm_prefs_saved"] = prefs
     except Exception:
         pass
 
@@ -276,6 +297,7 @@ def _do_fetch(dp, ticker: str, expiration: str, strike: float, strategy: str) ->
 
 def render_position_manager(dp=None) -> None:
     _load_pm_prefs()
+    _apply_prefill()
 
     st.subheader("\U0001f504 Roll vs Assign Decision Engine")
     st.caption(

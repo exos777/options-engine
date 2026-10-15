@@ -22,6 +22,17 @@ from strategies.models import (
 
 
 # ---------------------------------------------------------------------------
+# Storage isolation — every test gets its own throwaway SQLite database, so
+# nothing ever reads or writes the real ledger.
+# ---------------------------------------------------------------------------
+
+@pytest.fixture(autouse=True)
+def _isolated_store(tmp_path, monkeypatch):
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.setenv("OPTIONS_DB_URL", f"sqlite:///{tmp_path / 'test.db'}")
+
+
+# ---------------------------------------------------------------------------
 # OHLCV DataFrames
 # ---------------------------------------------------------------------------
 

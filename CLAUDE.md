@@ -139,6 +139,10 @@ App must always answer:
 
 - `data/provider.py` — yfinance wrapper, SSL bypass for corporate proxy
 - `data/common.py` — shared data utilities (expiration, earnings, helpers)
+- `data/store.py` — persistence (SQLite locally, Postgres via `DATABASE_URL` on Railway): prefs, trades, IV history
+- `portfolio/ledger.py` — replays trades into wheel cycles (adjusted basis, premium, realized P&L)
+- `portfolio/alerts.py` — exit alerts (50% profit take, strike tested, ITM, earnings, CC below basis)
+- `portfolio/exposure.py` — capital at risk vs account size / per-ticker limits
 - `indicators/technical.py` — SMA, EMA, Bollinger Bands, MACD, RSI, ATR
 - `indicators/support_resistance.py` — pivot-based S/R detection
 - `scoring/regime.py` — 6-regime classifier
@@ -148,6 +152,8 @@ App must always answer:
 - `scoring/engine.py` — recommendation selection + explanations
 - `ui/chart.py` — Plotly 3-panel chart
 - `ui/recommendations.py` — Streamlit card rendering
+- `ui/scanner.py` — Daily Scanner tab (records ATM IV daily for true IV rank)
+- `ui/ledger.py` — Ledger tab (journal, alerts, exposure, performance)
 - `app/main.py` — Streamlit entry point
 - `config.py` — secrets loader (dotenv)
 

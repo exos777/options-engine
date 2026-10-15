@@ -119,6 +119,42 @@ div[data-testid="column"] > div > div > div > button:focus {
     border-color: #3fb950;
     box-shadow: 0 0 0 2px #1a4a2e;
 }
+
+/* Main tabs: larger and spread evenly across the full width. The :not()
+   skips any tab bar sitting inside a nested stTabs, so in-tab sub-tabs
+   (e.g. the Ledger's "Single fill / Roll") keep Streamlit's default. */
+[data-testid="stTabs"] [role="tablist"]:not([data-testid="stTabs"] [data-testid="stTabs"] *) {
+    gap: 0.5rem;
+}
+[data-testid="stTabs"] [role="tablist"]:not([data-testid="stTabs"] [data-testid="stTabs"] *) > [role="tab"] {
+    flex: 1 1 0;
+    justify-content: center;
+    padding: 0.85rem 0.5rem;
+    border-radius: 8px 8px 0 0;
+}
+[data-testid="stTabs"] [role="tablist"]:not([data-testid="stTabs"] [data-testid="stTabs"] *) > [role="tab"]:hover {
+    background-color: rgba(255, 255, 255, 0.05);
+}
+[data-testid="stTabs"] [role="tablist"]:not([data-testid="stTabs"] [data-testid="stTabs"] *) > [role="tab"] p {
+    font-size: 1.2rem;
+    font-weight: 600;
+}
+@media (max-width: 640px) {
+    /* Phones: let labels wrap so all four tabs fit without scrolling. */
+    [data-testid="stTabs"] [role="tablist"]:not([data-testid="stTabs"] [data-testid="stTabs"] *) {
+        gap: 0.25rem;
+    }
+    [data-testid="stTabs"] [role="tablist"]:not([data-testid="stTabs"] [data-testid="stTabs"] *) > [role="tab"] {
+        min-width: 0;
+        padding: 0.6rem 0.25rem;
+    }
+    [data-testid="stTabs"] [role="tablist"]:not([data-testid="stTabs"] [data-testid="stTabs"] *) > [role="tab"] p {
+        font-size: 0.9rem;
+        line-height: 1.25;
+        white-space: normal;
+        text-align: center;
+    }
+}
 </style>
 """, unsafe_allow_html=True)
 

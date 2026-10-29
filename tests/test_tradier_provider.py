@@ -443,3 +443,46 @@ def test_module_re_exports_dte_and_earnings_warning():
     so tradier_provider must expose them at module level."""
     assert callable(tp.days_to_expiration)
     assert callable(tp.earnings_warning)
+
+
+# ── earnings calendar ───────────────────────────
+
+_CALENDAR = [{
+    "request": "AMZN", "type": "Symbol",
+    "results": [{"type": "Company", "tables": {"corporate_calendars": [
+        {"begin_date_time": "2026-07-30", "event_type": 8,
+         "event": "Amazon.com Inc Earnings Release Q2 2026"},
+        {"begin_date_time": "2026-10-29", "event_type": 8,
+         "event": "Amazon.com Inc Earnings Release Q3 2026"},
+        {"begin_date_time": "2026-10-20", "event_type": 3,
+         "event": "Annual Shareholder Meeting"},
+        {"begin_date_time": "2027-02-05", "event_type": 8,
+         "event": "Amazon.com Inc Earnings Release Q4 2026"},
+    ]}}],
+}]
+
+
+def test_next_earnings_matches_event_text_with_numeric_type():
+    from datetime import date
+    assert tp._next_earnings_from_calendar(_CALENDAR, today=date(2026, 10, 15)) == "2026-10-29"
+    assert tp._next_earnings_from_calendar(_CALENDAR, today=date(2026, 10, 29)) == "2026-10-29"
+    assert tp._next_earnings_from_calendar(_CALENDAR, today=date(2026, 10, 30)) == "2027-02-05"
+    assert tp._next_earnings_from_calendar({}, today=date(2026, 10, 1)) is None
+
+
+def test_get_earnings_date_calls_the_beta_fundamentals_endpoint():
+    with patch.object(tp, "_get", return_value=_CALENDAR) as mock_get:
+        tp.get_earnings_date("amzn")
+    url = mock_get.call_args[0][0]
+    assert url == "https://api.tradier.com/beta/markets/fundamentals/calendars"
+    assert mock_get.call_args[0][1] == {"symbols": "AMZN"}
+
+
+def test_request_accepts_absolute_urls():
+    ok = type("R", (), {"status_code": 200})()
+    with patch.object(tp, "_get_token", return_value="tok"), \
+         patch.object(tp.requests, "get", return_value=ok) as mock_get:
+        tp._request("https://api.tradier.com/beta/x")
+        tp._request("/markets/quotes")
+    assert mock_get.call_args_list[0][0][0] == "https://api.tradier.com/beta/x"
+    assert mock_get.call_args_list[1][0][0] == "https://api.tradier.com/v1/markets/quotes"

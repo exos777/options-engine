@@ -118,29 +118,36 @@ CC:
 - DTE > 21 → NO TRADE
 - Weekly regime strongly bearish (CSP) → NO TRADE
 
-## Daily Scanner — CSP Premium Mode
+## Daily Scanner — Same-Day CSP Mode
 
-The Daily Scanner tab is a separate, short-dated CSP mode for selling
-puts for maximum premium and buying them back before expiration.
-Assignment is the acceptable worst case, so the watchlist holds only
-quality stocks the trader would own. Its rules override the wheel
-filters above for this tab only:
+The Daily Scanner tab is a separate mode for selling a put and buying
+it back THE SAME DAY. Assignment is only the worst case if the trade
+can't be closed, so the watchlist holds only quality stocks the trader
+would own. Its rules override the wheel filters above for this tab only:
 
 - CSP only (no covered calls).
 - Earliest expiration only — a daily if listed, else the nearest weekly;
   never more than 7 DTE. Today's expiration counts until the 4:00 pm ET
   close. (Overrides "DTE < 5 → NO TRADE".)
-- Earnings are ALLOWED but flagged as gap risk. (Overrides the earnings
-  hard filter.)
+- Ranked by what a same-day round trip should earn
+  (`scoring/csp_premium.py`):
+  - decay today = |theta| (Tradier greeks, per day) × session hours
+    left ÷ 6.5, capped at 70% of the credit
+  - net edge = decay today − bid/ask spread (paid in and out)
+  - puts whose decay can't beat the spread are dropped
+- Score: net edge per $ of collateral 35%, liquidity 25% (spread 50%,
+  today's volume 30%, open interest 20%), delta 20% (sweet spot
+  0.10–0.20), distance vs expected move 10%, IV rank 5%, support 5%.
+- Earnings are ALLOWED but flagged, and halve the decay estimate: event
+  premium doesn't bleed intraday. (Overrides the earnings hard filter.)
 - Downtrend regime is a −10 score penalty and a badge, not a block.
-- Hard filters: OTM only, |delta| 0.08–0.35, bid ≥ $0.05, spread ≤ 10% of
-  mid (paid twice — entry and buy-back), OI or volume ≥ 50.
-- Score (`scoring/csp_premium.py`): premium per day on collateral 35%,
-  IV rank 20%, delta (sweet spot 0.15–0.25) 20%, distance vs expected
-  move 10%, spread 10%, support between strike and spot 5%.
-- Each pick shows a plan: buy back at the Ledger's profit target, stop at
-  2× credit, cost per share if assigned, cash required, and how many
-  contracts fit the Ledger's exposure limits.
+- Hard filters: OTM only, |delta| 0.05–0.35, bid ≥ $0.05, spread ≤ 10%
+  of mid, OI or volume ≥ 100.
+- Each pick shows a plan: target price if decay holds, stop at 2× credit,
+  close by 3:45 pm ET, cost if assigned, cash required, contracts that
+  fit the Ledger's limits; plus a "Compare strikes" table (top 3).
+- The Ledger raises an action alert after 3:30 pm ET for any put opened
+  today that is still open.
 
 ## Position Sizing
 
@@ -165,7 +172,7 @@ App must always answer:
 - `data/common.py` — shared data utilities (expiration, earnings, helpers)
 - `data/store.py` — persistence (SQLite locally, Postgres via `DATABASE_URL` on Railway): prefs, trades, IV history
 - `portfolio/ledger.py` — replays trades into wheel cycles (adjusted basis, premium, realized P&L)
-- `portfolio/alerts.py` — exit alerts (50% profit take, strike tested, ITM, earnings, CC below basis)
+- `portfolio/alerts.py` — exit alerts (same-day close, 50% profit take, strike tested, ITM, earnings, CC below basis)
 - `portfolio/exposure.py` — capital at risk vs account size / per-ticker limits
 - `indicators/technical.py` — SMA, EMA, Bollinger Bands, MACD, RSI, ATR
 - `indicators/support_resistance.py` — pivot-based S/R detection
@@ -176,8 +183,8 @@ App must always answer:
 - `scoring/engine.py` — recommendation selection + explanations
 - `ui/chart.py` — Plotly 3-panel chart
 - `ui/recommendations.py` — Streamlit card rendering
-- `scoring/csp_premium.py` — short-dated CSP premium scorer (Daily Scanner)
-- `ui/scanner.py` — Daily Scanner tab, CSP premium mode (records ATM IV daily for true IV rank)
+- `scoring/csp_premium.py` — same-day CSP scorer (Daily Scanner)
+- `ui/scanner.py` — Daily Scanner tab, same-day CSP mode (records ATM IV daily for true IV rank)
 - `ui/ledger.py` — Ledger tab (journal, alerts, exposure, performance)
 - `app/main.py` — Streamlit entry point
 - `config.py` — secrets loader (dotenv)

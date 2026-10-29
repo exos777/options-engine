@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, time
 
 from portfolio.alerts import position_alerts, sort_alerts
 from portfolio.ledger import OpenShort
@@ -90,3 +90,16 @@ def test_sort_puts_actions_first():
         + position_alerts(_short(price=2.0), mark=0.5, today=TODAY)
     )
     assert [a.severity for a in sort_alerts(alerts)] == ["action", "warning"]
+
+
+def test_day_trade_alert_late_in_the_session():
+    opened_today = OpenShort(
+        ticker="TSLA", option_type="put", strike=100.0, expiration=date(2026, 10, 23),
+        contracts=1, avg_open_price=2.0, opened_on=TODAY,
+    )
+    late = position_alerts(opened_today, today=TODAY, now_time=time(15, 35))
+    assert _kinds(late) == {"day_trade"}
+    assert late[0].severity == "action"
+    assert position_alerts(opened_today, today=TODAY, now_time=time(11, 0)) == []
+    # Opened on an earlier day — not a same-day trade.
+    assert position_alerts(_short(), today=TODAY, now_time=time(15, 35)) == []

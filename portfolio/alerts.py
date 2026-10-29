@@ -3,6 +3,7 @@ Exit alerts for open short options.
 
 Rules (in priority order):
     expired       — past expiration but still open in the ledger
+    day_trade     — opened today and still open after 3:30 pm ET
     strike_tested — ≤ 2 DTE and the stock is ITM or within 1 ATR of strike
     profit_take   — ≥ 50% of the premium captured: buy back, redeploy
     below_basis   — covered call strike under the wheel-adjusted basis
@@ -15,13 +16,16 @@ Pure functions — callers supply spot / mark / ATR / earnings.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, time
 from typing import Optional
 
 from portfolio.ledger import OpenShort
 
 DEFAULT_PROFIT_TARGET = 0.50
 TESTED_MAX_DTE = 2
+
+# Same-day trades: warn from this time (ET) if a put opened today is open.
+DAY_TRADE_WARN_AFTER = time(15, 30)
 
 SEVERITY_ORDER = {"action": 0, "warning": 1, "info": 2}
 
@@ -50,6 +54,7 @@ def position_alerts(
     earnings_date: Optional[date] = None,
     adjusted_basis: Optional[float] = None,
     today: Optional[date] = None,
+    now_time: Optional[time] = None,
     profit_target: float = DEFAULT_PROFIT_TARGET,
 ) -> list[Alert]:
     """All alerts that currently apply to one open short."""
@@ -66,6 +71,15 @@ def position_alerts(
         add("action", "expired",
             f"Expired {short.expiration:%b %d} — log it as Expired or Assigned.")
         return alerts
+
+    if (
+        short.opened_on == today
+        and now_time is not None
+        and now_time >= DAY_TRADE_WARN_AFTER
+    ):
+        add("action", "day_trade",
+            "Opened today and still open — buy it back before 4:00 pm ET to "
+            "keep this a same-day trade.")
 
     itm = spot is not None and spot > 0 and _is_itm(short, spot)
 

@@ -34,6 +34,8 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 _BASE_URL = "https://api.tradier.com/v1"
+# Fundamentals (corporate calendars → earnings dates) live under /beta.
+_BETA_URL = "https://api.tradier.com/beta"
 _TIMEOUT_SECONDS = 15
 _MAX_RETRIES = 3
 _RETRY_BACKOFF_SECONDS = 0.75
@@ -148,7 +150,7 @@ def _request(path: str, params: Optional[dict] = None) -> requests.Response:
     for attempt in range(_MAX_RETRIES):
         try:
             resp = requests.get(
-                f"{_BASE_URL}{path}",
+                path if path.startswith("http") else f"{_BASE_URL}{path}",
                 headers=_headers(),
                 params=params or {},
                 timeout=_TIMEOUT_SECONDS,
@@ -370,19 +372,30 @@ def get_earnings_date(symbol: str) -> Optional[str]:
     """
     sym = _clean_symbol(symbol)
     try:
-        data = _get("/markets/fundamentals/calendars", {"symbols": sym})
+        data = _get(f"{_BETA_URL}/markets/fundamentals/calendars", {"symbols": sym})
     except Exception:
         return None
+    return _next_earnings_from_calendar(data)
 
-    today = date.today()
+
+def _next_earnings_from_calendar(data, today: Optional[date] = None) -> Optional[str]:
+    """
+    Earliest earnings event on or after *today* in a fundamentals-calendar
+    payload. Events nest under results → tables → corporate_calendars; the
+    event_type is a numeric code, so earnings are recognised by the event
+    description ("… Earnings Release …") as well as the type.
+    """
+    today = today or date.today()
     best: Optional[date] = None
 
     def _walk(node) -> None:
         nonlocal best
         if isinstance(node, dict):
-            ev_type = str(node.get("event_type", node.get("type", ""))).lower()
+            label = " ".join(
+                str(node.get(k, "")) for k in ("event", "event_type", "type")
+            ).lower()
             raw_date = node.get("begin_date_time") or node.get("date")
-            if "earnings" in ev_type and raw_date:
+            if "earning" in label and raw_date:
                 try:
                     d = date.fromisoformat(str(raw_date)[:10])
                     if d >= today and (best is None or d < best):

@@ -126,15 +126,7 @@ def get_quote(symbol: str) -> Quote:
     market_cap = _safe_float(getattr(info, "market_cap", None)) or None
 
     # Earnings date (best-effort)
-    earnings_date: Optional[str] = None
-    try:
-        cal = t.calendar
-        if cal is not None and not cal.empty:
-            ed = cal.get("Earnings Date")
-            if ed is not None and len(ed) > 0:
-                earnings_date = pd.Timestamp(ed.iloc[0]).date().isoformat()
-    except Exception:
-        pass
+    earnings_date = _yf_next_earnings(t)
 
     return Quote(
         ticker=symbol.upper(),
@@ -147,6 +139,57 @@ def get_quote(symbol: str) -> Quote:
         market_cap=market_cap,
         earnings_date=earnings_date,
     )
+
+
+def _yf_next_earnings(t, today: Optional[date] = None) -> Optional[str]:
+    """
+    Next earnings date (ISO) from yfinance's calendar, or None.
+
+    yfinance ≥ 0.2.3x returns ``calendar`` as a dict whose "Earnings Date"
+    is a list of dates (one, or a start/end range); older versions return
+    a DataFrame. Both are handled; dates before today are ignored.
+    """
+    today = today or date.today()
+    try:
+        cal = t.calendar
+    except Exception:
+        return None
+    if cal is None:
+        return None
+    try:
+        raw = cal.get("Earnings Date") if isinstance(cal, dict) else (
+            None if cal.empty else cal.get("Earnings Date")
+        )
+    except Exception:
+        return None
+    if raw is None:
+        return None
+    if isinstance(raw, pd.Series):
+        raw = list(raw)
+    elif not isinstance(raw, (list, tuple)):
+        raw = [raw]
+    dates = []
+    for v in raw:
+        try:
+            dates.append(pd.Timestamp(v).date())
+        except (TypeError, ValueError):
+            continue
+    upcoming = sorted(d for d in dates if d >= today)
+    return upcoming[0].isoformat() if upcoming else None
+
+
+def get_earnings_date(symbol: str) -> Optional[str]:
+    """
+    Next earnings date (ISO) — Tradier fundamentals first, then yfinance.
+    None means "unknown", never "no earnings".
+    """
+    tradier_result = _try_tradier("get_earnings_date", symbol)
+    if tradier_result:
+        return tradier_result
+    try:
+        return _yf_next_earnings(_ticker(symbol))
+    except Exception:
+        return None
 
 
 def get_expirations(symbol: str) -> tuple[str, ...]:

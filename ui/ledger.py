@@ -16,6 +16,7 @@ import io
 import os
 from datetime import date, datetime
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import streamlit as st
@@ -31,6 +32,7 @@ from portfolio.ledger import Ledger, OpenShort, WheelPosition, build_ledger
 from portfolio.models import Trade, TradeAction
 from ui.position_management import PM_PREFILL_KEY
 
+_MARKET_TZ = ZoneInfo("America/New_York")
 _SETTINGS_KEY = "ledger.settings"
 
 # Set by queue_trade_prefill(); applied before the trade form's widgets render.
@@ -166,6 +168,7 @@ def _live_data(dp, shorts: list[OpenShort], force: bool) -> Optional[dict]:
 
 
 def collect_alerts(ledger: Ledger, live: Optional[dict], profit_target: float) -> list[Alert]:
+    now_et = datetime.now(_MARKET_TZ)
     alerts: list[Alert] = []
     for pos in ledger.positions.values():
         for s in pos.open_shorts:
@@ -177,6 +180,8 @@ def collect_alerts(ledger: Ledger, live: Optional[dict], profit_target: float) -
                 atr=info.get("atr"),
                 earnings_date=info.get("earnings"),
                 adjusted_basis=pos.adjusted_basis,
+                today=now_et.date(),
+                now_time=now_et.time(),
                 profit_target=profit_target,
             )
     return sort_alerts(alerts)

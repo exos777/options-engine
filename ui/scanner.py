@@ -74,6 +74,13 @@ _IV_HISTORY_LOOKBACK_DAYS = 365
 # Earnings inside this many days are listed under the scan results.
 _EARNINGS_HORIZON_DAYS = 14
 
+# ATM IV this many times the 20-day realised vol, and at least this high
+# in absolute terms, flags an IV spike — the market pricing an event
+# (usually earnings) even when no date is known. The absolute floor keeps
+# calm index ETFs (0DTE SPY at 25% IV vs a 10% realised move) quiet.
+_IV_SPIKE_RATIO = 2.5
+_IV_SPIKE_MIN_IV = 0.40
+
 # Row background / border colours by score bucket.
 _COLOR_STRONG = ("#0d2a17", "#3fb950")
 _COLOR_OK = ("#2a2410", "#d29922")
@@ -155,6 +162,7 @@ class ScanRow:
     iv_rank: float = 0.0
     iv_rank_source: str = "rv"      # "iv" = true IV rank, "rv" = proxy
     expected_move: float = 0.0
+    realized_vol: float = 0.0       # 20-day annualised
     earnings_date: Optional[str] = None
     earnings_warning: bool = False  # earnings on/before expiration
     expiration: str = ""
@@ -180,6 +188,20 @@ class ScanRow:
     @property
     def tradeable(self) -> bool:
         return not self.error and not self.has_no_trade and self.strike is not None
+
+    @property
+    def iv_spike_ratio(self) -> float:
+        """ATM IV ÷ 20-day realised vol (0 when either is unknown)."""
+        if self.atm_iv <= 0 or self.realized_vol <= 0:
+            return 0.0
+        return self.atm_iv / self.realized_vol
+
+    @property
+    def iv_spike(self) -> bool:
+        return (
+            self.iv_spike_ratio >= _IV_SPIKE_RATIO
+            and self.atm_iv >= _IV_SPIKE_MIN_IV
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -284,6 +306,11 @@ def _resolve_iv_rank(ticker: str, hist_df, atm_iv: float) -> tuple[float, str]:
     return _iv_rank(hist_df, atm_iv), "rv"
 
 
+def _market_today() -> date:
+    """Today's date in New York — the server may run in UTC."""
+    return datetime.now(_MARKET_TZ).date()
+
+
 def _earnings_in_window(earnings_date: Optional[str], expiration: str) -> bool:
     """True if a known earnings date falls on/before the expiration."""
     if not earnings_date:
@@ -291,9 +318,51 @@ def _earnings_in_window(earnings_date: Optional[str], expiration: str) -> bool:
     try:
         ed = date.fromisoformat(earnings_date)
         exp = date.fromisoformat(expiration)
-        return date.today() <= ed <= exp
+        return _market_today() <= ed <= exp
     except (TypeError, ValueError):
         return False
+
+
+def _realized_vol(hist_df, window: int = 20) -> float:
+    """Annualised close-to-close volatility over the last *window* days."""
+    if hist_df is None or len(hist_df) < window + 1:
+        return 0.0
+    close = hist_df["Close"].astype(float)
+    log_ret = np.log(close / close.shift(1)).dropna().tail(window)
+    vol = float(log_ret.std() * math.sqrt(252))
+    return vol if math.isfinite(vol) else 0.0
+
+
+def _when(d: date, today: Optional[date] = None) -> str:
+    """'today' / 'tomorrow' / 'in 3d' / 'Mon Nov 03'."""
+    days = (d - (today or _market_today())).days
+    if days == 0:
+        return "today"
+    if days == 1:
+        return "tomorrow"
+    if 1 < days <= 6:
+        return f"in {days}d ({d:%a})"
+    return f"{d:%a %b %d}"
+
+
+def _resolve_earnings(dp, ticker: str, quote) -> Optional[str]:
+    """
+    Next earnings date (ISO) or None. The provider's dedicated lookup wins;
+    the quote's own date is used only if it hasn't already passed.
+    """
+    earnings_date = None
+    if hasattr(dp, "get_earnings_date"):
+        try:
+            earnings_date = _cached_daily(
+                dp, "earnings", ticker, lambda: dp.get_earnings_date(ticker),
+            )
+        except Exception:  # noqa: BLE001
+            earnings_date = None
+    if not earnings_date:
+        quoted = getattr(quote, "earnings_date", None)
+        if quoted and str(quoted)[:10] >= _market_today().isoformat():
+            earnings_date = str(quoted)[:10]
+    return earnings_date
 
 
 # Per-day cache for data that doesn't change intraday (history, the list of
@@ -376,6 +445,7 @@ def _scan_one(
     # 5. IV, IV rank, expected move
     atm_iv = _atm_iv(puts + calls, quote.price)
     row.atm_iv = atm_iv
+    row.realized_vol = _realized_vol(hist)
     row.iv_rank, row.iv_rank_source = _resolve_iv_rank(ticker, hist, atm_iv)
     row.expected_move = (
         quote.price * atm_iv * math.sqrt(max(dte, 1) / 365)
@@ -384,14 +454,7 @@ def _scan_one(
     )
 
     # 6. Earnings — allowed, just flagged
-    earnings_date = getattr(quote, "earnings_date", None)
-    if earnings_date is None and hasattr(dp, "get_earnings_date"):
-        try:
-            earnings_date = _cached_daily(
-                dp, "earnings", ticker, lambda: dp.get_earnings_date(ticker),
-            )
-        except Exception:  # noqa: BLE001
-            earnings_date = None
+    earnings_date = _resolve_earnings(dp, ticker, quote)
     row.earnings_date = earnings_date
     row.earnings_warning = _earnings_in_window(earnings_date, expiration)
 
@@ -469,7 +532,7 @@ def upcoming_earnings(
     rows: list[ScanRow], horizon_days: int = _EARNINGS_HORIZON_DAYS,
 ) -> list[tuple[str, date]]:
     """(ticker, earnings date) for rows reporting within *horizon_days*."""
-    today = date.today()
+    today = _market_today()
     out: list[tuple[str, date]] = []
     for r in rows:
         try:
@@ -510,11 +573,51 @@ def _cell(label: str, value: str, width: str = "1") -> str:
     )
 
 
-def _badges(row: ScanRow) -> str:
-    out = []
+def _event_banner(row: ScanRow) -> str:
+    """
+    Loud strip at the top of a card explaining WHY premium is high:
+    earnings before this put expires, else an unexplained IV spike.
+    Empty when neither applies.
+    """
+    pill = (
+        "display:inline-block;padding:2px 8px;border-radius:10px;"
+        "font-size:11px;font-weight:700;letter-spacing:.04em;margin-right:8px;"
+    )
     if row.earnings_warning and row.earnings_date:
         ed = date.fromisoformat(row.earnings_date)
-        out.append(f"📅 Earnings {ed:%a %b %d} — gap risk")
+        spike = (
+            f" IV is {row.iv_spike_ratio:.1f}× its normal move."
+            if row.iv_spike else ""
+        )
+        return (
+            f'<div style="background:#3d2a0a;border:1px solid #d29922;'
+            f'border-radius:6px;padding:6px 10px;margin-bottom:8px;'
+            f'font-size:12px;color:#f0c674;">'
+            f'<span style="{pill}background:#d29922;color:#0d1117;">'
+            f"📅 EARNINGS {_when(ed).upper()}</span>"
+            f"<b>{ed:%a %b %d}</b> — before this put expires. The high premium "
+            f"is earnings premium: expect a gap and an IV crush after the report."
+            f"{spike}</div>"
+        )
+    if row.iv_spike:
+        return (
+            f'<div style="background:#2a1a3d;border:1px solid #a371f7;'
+            f'border-radius:6px;padding:6px 10px;margin-bottom:8px;'
+            f'font-size:12px;color:#d2b8ff;">'
+            f'<span style="{pill}background:#a371f7;color:#0d1117;">⚡ IV SPIKE</span>'
+            f"IV {row.atm_iv * 100:.0f}% is {row.iv_spike_ratio:.1f}× the stock's "
+            f"20-day move ({row.realized_vol * 100:.0f}%) — the market is pricing "
+            f"an event. No earnings date found: check for earnings or news.</div>"
+        )
+    return ""
+
+
+def _badges(row: ScanRow) -> str:
+    out = []
+    if row.earnings_date and not row.earnings_warning:
+        ed = date.fromisoformat(row.earnings_date)
+        if 0 <= (ed - _market_today()).days <= _EARNINGS_HORIZON_DAYS:
+            out.append(f"📅 Next earnings {ed:%a %b %d} — after this expiration")
     if row.downtrend:
         out.append(f"📉 Downtrend (−{_DOWNTREND_PENALTY:.0f} score)")
     if row.tradeable and row.outside_expected_move:
@@ -552,6 +655,9 @@ def _render_row(
             reason = row.error or row.no_trade_reason
             color = "#f85149" if row.error else "#8b949e"
             extra = _badges(row)
+            if row.earnings_warning and row.earnings_date:
+                ed = date.fromisoformat(row.earnings_date)
+                extra = f"📅 Earnings {_when(ed)}" + (f"  ·  {extra}" if extra else "")
             st.markdown(
                 f'<div style="background:{bg};border:1px solid {border};'
                 f'border-left:4px solid {border};border-radius:8px;'
@@ -577,7 +683,12 @@ def _render_row(
         )
         delta_txt = f" · Δ{row.delta:.2f}" if row.delta is not None else ""
         cells = "".join([
-            _cell("Ticker", f"<b>{row.ticker}</b>", "0.9"),
+            _cell(
+                "Ticker",
+                f"<b>{row.ticker}</b>"
+                + (" 📅" if row.earnings_warning else " ⚡" if row.iv_spike else ""),
+                "0.9",
+            ),
             _cell("Price", price_html, "1.3"),
             _cell("Expires", f"{row.expiration[5:]} · {row.dte}d", "1.1"),
             _cell("IV · Rank", iv_html, "1.1"),
@@ -594,6 +705,7 @@ def _render_row(
             f'<div style="background:{bg};border:1px solid {border};'
             f'border-left:4px solid {border};border-radius:8px;'
             f'padding:10px 14px;margin-bottom:6px;">'
+            f"{_event_banner(row)}"
             f'<div style="display:flex;gap:14px;align-items:center;">{cells}</div>'
             f'<div style="font-size:12px;color:#c9d1d9;margin-top:6px;">'
             f"{_plan_line(row, fits, profit_target)}</div>"
@@ -615,7 +727,9 @@ def _render_row(
                 strike=row.strike,
                 expiration=date.fromisoformat(row.expiration),
                 price=row.credit,
-                note=f"scanner score {row.score:.0f}",
+                note=f"scanner score {row.score:.0f}" + (
+                    f" · earnings {row.earnings_date}" if row.earnings_warning else ""
+                ),
             )
             st.toast(
                 f"{row.ticker} ${row.strike:g}P pre-filled — open the 📒 Ledger tab."

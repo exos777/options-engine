@@ -25,8 +25,12 @@ from ui.scanner import (
     _row_color,
     _resolve_iv_rank,
     _save_watchlist,
+    _event_banner,
+    _realized_vol,
+    _resolve_earnings,
     _scan_one,
     _true_iv_rank,
+    _when,
     apply_iv_floor,
     upcoming_earnings,
 )
@@ -335,3 +339,70 @@ def test_upcoming_earnings_lists_only_horizon_sorted():
         ScanRow(ticker="FFF"),
     ]
     assert [t for t, _ in upcoming_earnings(rows, horizon_days=14)] == ["BBB", "AAA"]
+
+
+# ── earnings + IV spike ─────────────────────────
+
+class _EarningsDP(_FakeDP):
+    def __init__(self, lookup, **kw):
+        super().__init__(**kw)
+        self.lookup = lookup
+
+    def get_earnings_date(self, t):
+        return self.lookup
+
+
+def test_resolve_earnings_prefers_provider_lookup():
+    quote = SimpleNamespace(earnings_date=_exp(20))
+    assert _resolve_earnings(_EarningsDP(_exp(1)), "T", quote) == _exp(1)
+
+
+def test_resolve_earnings_ignores_a_past_quote_date():
+    assert _resolve_earnings(_EarningsDP(None), "T", SimpleNamespace(earnings_date=_exp(-90))) is None
+    assert _resolve_earnings(_EarningsDP(None), "T", SimpleNamespace(earnings_date=_exp(3))) == _exp(3)
+
+
+def test_scan_one_uses_provider_earnings_lookup():
+    row = _scan_one(_EarningsDP(_exp(1)), "TEST", now=MORNING)
+    assert row.earnings_date == _exp(1)
+    assert row.earnings_warning and row.tradeable
+
+
+def test_realized_vol_and_iv_spike():
+    flat = pd.DataFrame({"Close": [100.0] * 30})
+    assert _realized_vol(flat) == 0.0
+    assert _realized_vol(pd.DataFrame({"Close": [100.0] * 5})) == 0.0
+    wiggly = pd.DataFrame({"Close": [100 * (1.01 if i % 2 else 0.99) for i in range(40)]})
+    assert _realized_vol(wiggly) > 0.2
+
+    row = ScanRow(ticker="AMZN", atm_iv=1.34, realized_vol=0.30)
+    assert row.iv_spike_ratio == pytest.approx(1.34 / 0.30)
+    assert row.iv_spike
+    assert not ScanRow(ticker="X", atm_iv=0.35, realized_vol=0.30).iv_spike
+    assert not ScanRow(ticker="X", atm_iv=0.35).iv_spike
+    # Calm index ETF: high ratio but low absolute IV — not an event.
+    assert not ScanRow(ticker="SPY", atm_iv=0.25, realized_vol=0.09).iv_spike
+    # Busy but normal: 2.2× is below the 2.5× bar.
+    assert not ScanRow(ticker="X", atm_iv=0.66, realized_vol=0.30).iv_spike
+
+
+def test_when_labels():
+    today = date(2026, 10, 29)
+    assert _when(date(2026, 10, 29), today) == "today"
+    assert _when(date(2026, 10, 30), today) == "tomorrow"
+    assert _when(date(2026, 11, 2), today) == "in 4d (Mon)"
+    assert _when(date(2026, 11, 20), today) == "Fri Nov 20"
+
+
+def test_event_banner_explains_the_premium():
+    earnings = ScanRow(ticker="AMZN", strike=237.5, earnings_date=_exp(0),
+                       earnings_warning=True, atm_iv=1.34, realized_vol=0.30)
+    html = _event_banner(earnings)
+    assert "📅 EARNINGS TODAY" in html and "earnings premium" in html
+    assert "4.5×" in html
+
+    spike = ScanRow(ticker="AMZN", strike=237.5, atm_iv=1.34, realized_vol=0.30)
+    html = _event_banner(spike)
+    assert "⚡ IV SPIKE" in html and "No earnings date found" in html
+
+    assert _event_banner(ScanRow(ticker="X", atm_iv=0.3, realized_vol=0.3)) == ""

@@ -50,17 +50,35 @@ from ui import ledger as ledger_ui
 # Constants
 # ---------------------------------------------------------------------------
 
-# Quality names with liquid daily/weekly options — stocks worth owning if a
-# put is assigned. The first 15 are the trader's core list; the rest are
-# large, profitable companies and broad ETFs with tight option markets.
-DEFAULT_WATCHLIST: list[str] = sorted([
-    # Core
+_CORE = [
     "AAPL", "AMD", "AMZN", "GOOG", "INTC", "META", "MSFT", "MU", "NFLX",
     "NVDA", "PLTR", "QQQ", "SNOW", "SPY", "TSLA",
-    # Added quality
+]
+_QUALITY_ADDED = [
     "ADBE", "ARM", "AVGO", "COST", "CRM", "CRWD", "IWM", "JPM", "LLY",
     "MA", "ORCL", "PANW", "SHOP", "SMH", "UBER", "V", "WMT", "XLK",
-])
+]
+_SIMILAR_ADDED = [
+    # Semis & hardware
+    "AMAT", "ASML", "DELL", "LRCX", "MRVL", "QCOM", "TSM",
+    # Software & networking
+    "ANET", "INTU", "NOW",
+    # Consumer internet, media, finance, health
+    "ABNB", "DASH", "DIS", "GS", "UNH",
+]
+
+# Quality names with liquid daily/weekly options — stocks worth owning if a
+# put is assigned: the trader's core list, then large profitable companies
+# and broad ETFs with tight option markets. Speculative high-IV names
+# (COIN, HOOD, SMCI, MSTR) are left out on purpose; add them by hand.
+DEFAULT_WATCHLIST: list[str] = sorted(_CORE + _QUALITY_ADDED + _SIMILAR_ADDED)
+
+# Earlier defaults. A saved watchlist identical to one of these was never
+# customised, so it is upgraded to the current default on load.
+_LEGACY_DEFAULTS: list[frozenset[str]] = [
+    frozenset(_CORE),
+    frozenset(_CORE + _QUALITY_ADDED),
+]
 
 _CACHE_TTL_SECONDS = 300
 _MAX_WORKERS = 8
@@ -134,7 +152,10 @@ def _load_saved_watchlist() -> list[str]:
             saved = prefs.get("watchlist")
         except Exception:
             saved = None
-    return _clean_symbols(saved) or list(DEFAULT_WATCHLIST)
+    cleaned = _clean_symbols(saved)
+    if not cleaned or frozenset(cleaned) in _LEGACY_DEFAULTS:
+        return list(DEFAULT_WATCHLIST)
+    return cleaned
 
 
 def _save_watchlist(watchlist: list[str]) -> None:

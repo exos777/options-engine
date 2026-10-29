@@ -438,3 +438,25 @@ def test_session_note_warns_in_the_last_half_hour():
     assert not warn and "5h 00m left" in msg
     assert "opens" in _session_note(at(8))[0]
     assert "closed" in _session_note(at(16, 30))[0]
+
+
+# ── watchlist defaults ──────────────────────────
+
+def test_default_watchlist_extends_core_with_similar_names():
+    assert len(DEFAULT_WATCHLIST) == len(set(DEFAULT_WATCHLIST)) == 48
+    for sym in ("AAPL", "AMD", "AMZN", "GOOG", "INTC", "META", "MSFT", "MU",
+                "NFLX", "NVDA", "PLTR", "QQQ", "SNOW", "SPY", "TSLA",
+                "AVGO", "AMAT", "TSM", "NOW", "IWM"):
+        assert sym in DEFAULT_WATCHLIST
+    for speculative in ("COIN", "HOOD", "SMCI", "MSTR"):
+        assert speculative not in DEFAULT_WATCHLIST
+
+
+def test_saved_old_default_upgrades_but_custom_list_is_kept(tmp_path, monkeypatch):
+    monkeypatch.setattr(scanner, "_PREFS_PATH", tmp_path / "none.json")
+    old_core = ["AAPL", "AMD", "AMZN", "GOOG", "INTC", "META", "MSFT", "MU",
+                "NFLX", "NVDA", "PLTR", "QQQ", "SNOW", "SPY", "TSLA"]
+    _save_watchlist(old_core)
+    assert _load_saved_watchlist() == list(DEFAULT_WATCHLIST)
+    _save_watchlist(old_core[:-1] + ["COIN"])
+    assert _load_saved_watchlist() == old_core[:-1] + ["COIN"]

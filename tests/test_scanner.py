@@ -1,6 +1,7 @@
 """Tests for ui/scanner.py — pure scan/render logic (no network)."""
 
-from datetime import date, timedelta
+from datetime import date, datetime, time, timedelta
+from types import SimpleNamespace
 
 import pandas as pd
 import pytest
@@ -15,8 +16,8 @@ from ui.scanner import (
     _COLOR_STRONG,
     _COLOR_WEAK,
     _atm_iv,
+    _MARKET_TZ,
     _earnings_in_window,
-    _effective_score,
     _iv_rank,
     _load_saved_watchlist,
     _parse_watchlist,
@@ -24,7 +25,9 @@ from ui.scanner import (
     _row_color,
     _resolve_iv_rank,
     _save_watchlist,
+    _scan_one,
     _true_iv_rank,
+    apply_iv_floor,
     upcoming_earnings,
 )
 from data import store
@@ -37,38 +40,47 @@ def _exp(days_out: int) -> str:
     return (date.today() + timedelta(days=days_out)).isoformat()
 
 
-def test_pick_expiration_picks_nearest_future_date():
-    # Daily-options case: nearest day wins regardless of how many exist.
+def _at(hour: int, minute: int = 0) -> datetime:
+    """Today in market time, at the given clock time."""
+    return datetime.combine(date.today(), time(hour, minute), tzinfo=_MARKET_TZ)
+
+
+MORNING = _at(10)
+EVENING = _at(16, 30)
+
+
+def test_pick_expiration_picks_earliest_daily():
     exps = [_exp(1), _exp(6), _exp(14), _exp(30)]
-    chosen, dte = _pick_expiration(exps)
-    assert chosen == _exp(1)
-    assert dte == 1
+    assert _pick_expiration(exps, MORNING) == (_exp(1), 1)
 
 
 def test_pick_expiration_picks_nearest_weekly_when_no_dailies():
-    # Weekly-only case: closest Friday to scan date.
     exps = [_exp(3), _exp(10), _exp(17)]
-    chosen, dte = _pick_expiration(exps)
-    assert chosen == _exp(3)
-    assert dte == 3
+    assert _pick_expiration(exps, MORNING) == (_exp(3), 3)
 
 
 def test_pick_expiration_ignores_past_dates():
-    exps = [_exp(-3), _exp(6)]
-    chosen, _ = _pick_expiration(exps)
+    chosen, _ = _pick_expiration([_exp(-3), _exp(6)], MORNING)
     assert chosen == _exp(6)
 
 
-def test_pick_expiration_includes_today_zero_dte():
-    exps = [_exp(0), _exp(7)]
-    chosen, dte = _pick_expiration(exps)
-    assert chosen == _exp(0)
-    assert dte == 0
+def test_pick_expiration_uses_today_while_market_open():
+    assert _pick_expiration([_exp(0), _exp(1)], MORNING) == (_exp(0), 0)
+
+
+def test_pick_expiration_skips_today_after_the_close():
+    assert _pick_expiration([_exp(0), _exp(1)], EVENING) == (_exp(1), 1)
+
+
+def test_pick_expiration_never_more_than_a_week_out():
+    assert _pick_expiration([_exp(7), _exp(14)], MORNING) == (_exp(7), 7)
+    with pytest.raises(ValueError):
+        _pick_expiration([_exp(8), _exp(14)], MORNING)
 
 
 def test_pick_expiration_raises_when_no_future_expirations():
     with pytest.raises(ValueError):
-        _pick_expiration([_exp(-1), _exp(-5)])
+        _pick_expiration([_exp(-1), _exp(-5)], MORNING)
 
 
 # ── _atm_iv ─────────────────────────────────────
@@ -127,30 +139,106 @@ def test_earnings_in_window_false_when_unknown():
     assert _earnings_in_window(None, _exp(7)) is False
 
 
-# ── _effective_score ────────────────────────────
-
-def test_effective_score_respects_strategy_filter():
-    row = ScanRow(ticker="X", best_csp_score=72.0, best_cc_score=55.0)
-    assert _effective_score(row, "CSP only") == 72.0
-    assert _effective_score(row, "CC only") == 55.0
-    assert _effective_score(row, "Both") == 72.0
-
-
 # ── _row_color ──────────────────────────────────
 
+def _tradeable(score: float) -> ScanRow:
+    return ScanRow(ticker="X", strike=100.0, score=score)
+
+
 def test_row_color_buckets_by_score():
-    assert _row_color(ScanRow(ticker="X"), 80.0) == _COLOR_STRONG
-    assert _row_color(ScanRow(ticker="X"), 60.0) == _COLOR_OK
-    assert _row_color(ScanRow(ticker="X"), 30.0) == _COLOR_WEAK
+    assert _row_color(_tradeable(80.0)) == _COLOR_STRONG
+    assert _row_color(_tradeable(60.0)) == _COLOR_OK
+    assert _row_color(_tradeable(30.0)) == _COLOR_WEAK
 
 
-def test_row_color_muted_for_no_trade_and_earnings():
-    no_trade = ScanRow(ticker="X", has_no_trade=True, no_trade_reason="x")
-    earnings = ScanRow(ticker="X", earnings_warning=True)
+def test_row_color_muted_when_not_tradeable_but_earnings_stays_colored():
+    no_trade = ScanRow(ticker="X", strike=100.0, score=90.0,
+                       has_no_trade=True, no_trade_reason="x")
     errored = ScanRow(ticker="X", error="boom")
-    assert _row_color(no_trade, 90.0) == _COLOR_MUTED
-    assert _row_color(earnings, 90.0) == _COLOR_MUTED
-    assert _row_color(errored, 90.0) == _COLOR_MUTED
+    no_pick = ScanRow(ticker="X")
+    assert _row_color(no_trade) == _COLOR_MUTED
+    assert _row_color(errored) == _COLOR_MUTED
+    assert _row_color(no_pick) == _COLOR_MUTED
+    earnings = ScanRow(ticker="X", strike=100.0, score=90.0, earnings_warning=True)
+    assert _row_color(earnings) == _COLOR_STRONG     # allowed, just flagged
+
+
+# ── IV floor ────────────────────────────────────
+
+def test_apply_iv_floor_is_reversible():
+    rows = [ScanRow(ticker="A", strike=10.0, score=80, iv_rank=20),
+            ScanRow(ticker="B", strike=10.0, score=80, iv_rank=60)]
+    apply_iv_floor(rows, 30)
+    assert [r.tradeable for r in rows] == [False, True]
+    assert rows[0].no_trade_reason == "IV rank 20 < 30"
+    apply_iv_floor(rows, 10)
+    assert [r.tradeable for r in rows] == [True, True]
+
+
+# ── _scan_one end to end (fake provider) ────────
+
+@pytest.fixture(autouse=True)
+def _fresh_daily_cache():
+    """The per-day data cache is module-global; isolate each test."""
+    scanner._daily_cache.clear()
+    yield
+    scanner._daily_cache.clear()
+
+
+class _FakeDP:
+    """Spot 100, one expiration in 2 days, a ladder of OTM puts."""
+    __name__ = "fake_dp"
+
+    def __init__(self, exp_days=2, earnings=None, closes=None):
+        self.exp = _exp(exp_days)
+        self.earnings = earnings
+        self.closes = closes or [100 + (i % 5) for i in range(130)]
+
+    def get_quote(self, t):
+        return SimpleNamespace(price=100.0, change_pct=-0.01, earnings_date=self.earnings)
+
+    def get_expirations(self, t):
+        return (self.exp, _exp(30))
+
+    def get_option_chain(self, t, exp):
+        def put(k, bid, ask, d):
+            return OptionContract(strike=k, expiration=exp, option_type="put",
+                                  bid=bid, ask=ask, last=bid, volume=500,
+                                  open_interest=1000, implied_volatility=0.45, delta=-d)
+        puts = [put(99, 1.40, 1.45, 0.40), put(97, 0.80, 0.83, 0.22),
+                put(95, 0.40, 0.42, 0.12), put(90, 0.04, 0.06, 0.03)]
+        return [], puts
+
+    def get_historical(self, t, months=6):
+        n = len(self.closes)
+        return pd.DataFrame({
+            "Open": self.closes, "High": [c + 1 for c in self.closes],
+            "Low": [c - 1 for c in self.closes], "Close": self.closes,
+            "Volume": [1_000_000] * n,
+        }, index=pd.date_range(end=date.today(), periods=n, freq="D"))
+
+
+def test_scan_one_picks_a_put_and_builds_a_plan():
+    row = _scan_one(_FakeDP(), "TEST", now=MORNING)
+    assert row.error == ""
+    assert row.tradeable
+    assert row.expiration == _exp(2) and row.dte == 2
+    assert row.strike in (97, 95)                 # 0.40Δ and 0.03Δ excluded
+    assert row.buy_back_at == pytest.approx(row.credit * 0.5, abs=0.01)
+    assert row.assigned_cost == pytest.approx(row.strike - row.credit, abs=0.01)
+    assert row.cash_required == row.strike * 100
+    assert not row.earnings_warning
+
+
+def test_scan_one_flags_but_allows_earnings():
+    row = _scan_one(_FakeDP(earnings=_exp(1)), "TEST", now=MORNING)
+    assert row.tradeable and row.earnings_warning
+
+
+def test_scan_one_no_trade_when_nothing_within_a_week():
+    row = _scan_one(_FakeDP(exp_days=9), "TEST", now=MORNING)
+    assert not row.tradeable and row.error == ""
+    assert row.no_trade_reason == "No expiry ≤ 7d"
 
 
 # ── watchlist default ───────────────────────────

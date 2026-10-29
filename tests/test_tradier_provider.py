@@ -192,6 +192,37 @@ def test_request_does_not_retry_http_status_errors():
     assert mock_get.call_count == 1
 
 
+def test_request_waits_out_rate_limit_then_succeeds():
+    """A 429 from a scan burst is retried after Tradier's reset time."""
+    limited = type("R", (), {"status_code": 429, "headers": {"X-Ratelimit-Expiry": "0"}})()
+    ok = type("R", (), {"status_code": 200})()
+    with patch.object(tp, "_get_token", return_value="tok"), \
+         patch.object(tp.time, "sleep") as mock_sleep, \
+         patch.object(tp.requests, "get", side_effect=[limited, ok]) as mock_get:
+        out = tp._request("/markets/quotes")
+    assert out is ok
+    assert mock_get.call_count == 2
+    assert mock_sleep.call_args[0][0] == 2.0      # backoff when no reset time
+
+
+def test_rate_limit_wait_uses_reset_time_and_caps_it():
+    with patch.object(tp.time, "time", return_value=1000.0):
+        soon = type("R", (), {"headers": {"X-Ratelimit-Expiry": "1003000"}})()
+        assert tp._rate_limit_wait(soon, 0) == pytest.approx(3.1)
+        far = type("R", (), {"headers": {"X-Ratelimit-Expiry": "1090000"}})()
+        assert tp._rate_limit_wait(far, 0) == 10.0
+
+
+def test_request_returns_last_429_when_retries_run_out():
+    limited = type("R", (), {"status_code": 429, "headers": {}})()
+    with patch.object(tp, "_get_token", return_value="tok"), \
+         patch.object(tp.time, "sleep"), \
+         patch.object(tp.requests, "get", return_value=limited) as mock_get:
+        out = tp._request("/markets/quotes")
+    assert out is limited
+    assert mock_get.call_count == tp._MAX_RETRIES
+
+
 def test_get_calls_raise_without_token(monkeypatch):
     monkeypatch.delenv("TRADIER_TOKEN", raising=False)
     with patch.object(tp, "_get_token", return_value=""):

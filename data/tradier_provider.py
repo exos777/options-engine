@@ -144,9 +144,10 @@ def _request(path: str, params: Optional[dict] = None) -> requests.Response:
     and retrying it just wastes time.
     """
     last_exc: Optional[Exception] = None
+    resp = None
     for attempt in range(_MAX_RETRIES):
         try:
-            return requests.get(
+            resp = requests.get(
                 f"{_BASE_URL}{path}",
                 headers=_headers(),
                 params=params or {},
@@ -156,7 +157,33 @@ def _request(path: str, params: Optional[dict] = None) -> requests.Response:
             last_exc = exc
             if attempt < _MAX_RETRIES - 1:
                 time.sleep(_RETRY_BACKOFF_SECONDS * (attempt + 1))
+            continue
+        # 429 is the one status worth waiting out: a watchlist scan bursts
+        # past Tradier's per-minute quota, and the window resets quickly.
+        if resp.status_code == 429 and attempt < _MAX_RETRIES - 1:
+            time.sleep(_rate_limit_wait(resp, attempt))
+            continue
+        return resp
+    if resp is not None:
+        return resp
     raise last_exc  # type: ignore[misc]
+
+
+_MAX_RATE_LIMIT_WAIT_SECONDS = 10.0
+
+
+def _rate_limit_wait(resp, attempt: int) -> float:
+    """Seconds to wait after a 429: Tradier's reset time, else a backoff."""
+    headers = getattr(resp, "headers", None) or {}
+    try:
+        expiry_ms = float(headers.get("X-Ratelimit-Expiry", 0))
+        if expiry_ms > 0:
+            wait = expiry_ms / 1000.0 - time.time()
+            if wait > 0:
+                return min(wait + 0.1, _MAX_RATE_LIMIT_WAIT_SECONDS)
+    except (TypeError, ValueError):
+        pass
+    return min(2.0 * (attempt + 1), _MAX_RATE_LIMIT_WAIT_SECONDS)
 
 
 def _get(path: str, params: Optional[dict] = None) -> dict:

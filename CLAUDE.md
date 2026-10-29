@@ -118,6 +118,30 @@ CC:
 - DTE > 21 → NO TRADE
 - Weekly regime strongly bearish (CSP) → NO TRADE
 
+## Daily Scanner — CSP Premium Mode
+
+The Daily Scanner tab is a separate, short-dated CSP mode for selling
+puts for maximum premium and buying them back before expiration.
+Assignment is the acceptable worst case, so the watchlist holds only
+quality stocks the trader would own. Its rules override the wheel
+filters above for this tab only:
+
+- CSP only (no covered calls).
+- Earliest expiration only — a daily if listed, else the nearest weekly;
+  never more than 7 DTE. Today's expiration counts until the 4:00 pm ET
+  close. (Overrides "DTE < 5 → NO TRADE".)
+- Earnings are ALLOWED but flagged as gap risk. (Overrides the earnings
+  hard filter.)
+- Downtrend regime is a −10 score penalty and a badge, not a block.
+- Hard filters: OTM only, |delta| 0.08–0.35, bid ≥ $0.05, spread ≤ 10% of
+  mid (paid twice — entry and buy-back), OI or volume ≥ 50.
+- Score (`scoring/csp_premium.py`): premium per day on collateral 35%,
+  IV rank 20%, delta (sweet spot 0.15–0.25) 20%, distance vs expected
+  move 10%, spread 10%, support between strike and spot 5%.
+- Each pick shows a plan: buy back at the Ledger's profit target, stop at
+  2× credit, cost per share if assigned, cash required, and how many
+  contracts fit the Ledger's exposure limits.
+
 ## Position Sizing
 
 | Score   | Size          |
@@ -152,7 +176,8 @@ App must always answer:
 - `scoring/engine.py` — recommendation selection + explanations
 - `ui/chart.py` — Plotly 3-panel chart
 - `ui/recommendations.py` — Streamlit card rendering
-- `ui/scanner.py` — Daily Scanner tab (records ATM IV daily for true IV rank)
+- `scoring/csp_premium.py` — short-dated CSP premium scorer (Daily Scanner)
+- `ui/scanner.py` — Daily Scanner tab, CSP premium mode (records ATM IV daily for true IV rank)
 - `ui/ledger.py` — Ledger tab (journal, alerts, exposure, performance)
 - `app/main.py` — Streamlit entry point
 - `config.py` — secrets loader (dotenv)

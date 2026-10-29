@@ -32,6 +32,9 @@ from portfolio.models import Trade, TradeAction
 from ui.position_management import PM_PREFILL_KEY
 
 _SETTINGS_KEY = "ledger.settings"
+
+# Set by queue_trade_prefill(); applied before the trade form's widgets render.
+LEDGER_PREFILL_KEY = "_ledger_trade_prefill"
 _DEFAULT_SETTINGS = {
     "account_size": 0.0,
     "max_ticker_pct": DEFAULT_MAX_TICKER_PCT,
@@ -392,8 +395,44 @@ def _render_performance(ledger: Ledger) -> None:
         )
 
 
+def queue_trade_prefill(
+    ticker: str, strike: float, expiration: date, price: float,
+    option_type: str = "put", note: str = "",
+) -> None:
+    """
+    Pre-fill the Log a Trade form with a sell-to-open. Called by other
+    tabs (the scanner's Log button); applied the next time the form renders.
+    """
+    st.session_state[LEDGER_PREFILL_KEY] = {
+        "ldg_f_action": TradeAction.SELL_TO_OPEN,
+        "ldg_f_ticker": ticker,
+        "ldg_f_date": date.today(),
+        "ldg_f_qty": 1,
+        "ldg_f_type": option_type,
+        "ldg_f_strike": float(strike),
+        "ldg_f_exp": expiration,
+        "ldg_f_price": round(float(price), 2),
+        "ldg_f_notes": note,
+    }
+
+
+def _apply_trade_prefill() -> bool:
+    prefill = st.session_state.pop(LEDGER_PREFILL_KEY, None)
+    if not prefill:
+        return False
+    for k, v in prefill.items():
+        st.session_state[k] = v
+    return True
+
+
 def _render_trade_form() -> None:
     st.markdown("#### ✍️ Log a Trade")
+    if _apply_trade_prefill():
+        st.info(
+            "Pre-filled from the scanner — set your actual fill price and "
+            "contracts, then **➕ Add trade**.",
+            icon="📒",
+        )
     tab_single, tab_roll = st.tabs(["Single fill", "Roll (close + reopen)"])
 
     with tab_single:
@@ -401,23 +440,26 @@ def _render_trade_form() -> None:
             c = st.columns(4)
             action = c[0].selectbox(
                 "Action", list(TradeAction), format_func=lambda a: a.label,
+                key="ldg_f_action",
             )
-            ticker = c[1].text_input("Ticker").upper().strip()
-            trade_date = c[2].date_input("Trade date", value=date.today())
+            ticker = c[1].text_input("Ticker", key="ldg_f_ticker").upper().strip()
+            trade_date = c[2].date_input("Trade date", key="ldg_f_date")
             quantity = c[3].number_input(
-                "Contracts (or shares)", min_value=1, value=1, step=1,
+                "Contracts (or shares)", min_value=1, step=1, key="ldg_f_qty",
             )
             c = st.columns(5)
-            option_type = c[0].radio("Type", ["put", "call"], horizontal=True)
-            strike = c[1].number_input("Strike", min_value=0.0, step=0.5)
-            expiration = c[2].date_input("Expiration", value=date.today())
+            option_type = c[0].radio(
+                "Type", ["put", "call"], horizontal=True, key="ldg_f_type",
+            )
+            strike = c[1].number_input("Strike", min_value=0.0, step=0.5, key="ldg_f_strike")
+            expiration = c[2].date_input("Expiration", key="ldg_f_exp")
             price = c[3].number_input(
-                "Price / share", min_value=0.0, step=0.01,
+                "Price / share", min_value=0.0, step=0.01, key="ldg_f_price",
                 help="Option premium per share, or share price for share trades. "
                      "Not needed for Expired / Assigned.",
             )
-            fees = c[4].number_input("Fees ($)", min_value=0.0, step=0.01)
-            notes = st.text_input("Notes", placeholder="optional")
+            fees = c[4].number_input("Fees ($)", min_value=0.0, step=0.01, key="ldg_f_fees")
+            notes = st.text_input("Notes", placeholder="optional", key="ldg_f_notes")
             submitted = st.form_submit_button("➕ Add trade", type="primary")
 
         if submitted:

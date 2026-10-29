@@ -23,7 +23,7 @@ import math
 import pathlib
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
 from typing import Callable, Optional
 from zoneinfo import ZoneInfo
@@ -35,7 +35,13 @@ from data import store
 from indicators.support_resistance import find_support_resistance
 from indicators.technical import calculate_full_indicators
 from portfolio.exposure import compute_exposure, max_new_csp_contracts
-from scoring.csp_premium import MAX_DTE, PremiumParams, score_premium_puts
+from scoring.csp_premium import (
+    CLOSE_BY,
+    MAX_DTE,
+    SESSION_HOURS,
+    PremiumParams,
+    score_premium_puts,
+)
 from scoring.regime import classify_regime
 from strategies.models import ChartRegime, OptionContract
 from ui import ledger as ledger_ui
@@ -60,7 +66,11 @@ _CACHE_TTL_SECONDS = 300
 _MAX_WORKERS = 8
 
 _MARKET_TZ = ZoneInfo("America/New_York")
+_MARKET_OPEN = time(9, 30)
 _MARKET_CLOSE = time(16, 0)
+
+# Runner-up strikes kept per ticker for the "Compare strikes" table.
+_ALTERNATIVES = 3
 
 # Score penalty when the chart is in a confirmed downtrend: still shown
 # (high IV often comes with selloffs) but ranked below calmer setups.
@@ -167,20 +177,30 @@ class ScanRow:
     earnings_warning: bool = False  # earnings on/before expiration
     expiration: str = ""
     dte: int = 0
+    hours_left: float = 0.0         # session hours left when scanned
     # Best put
     strike: Optional[float] = None
     credit: float = 0.0
+    bid: float = 0.0
+    ask: float = 0.0
+    volume: int = 0
+    open_interest: int = 0
     delta: Optional[float] = None
-    yield_per_day: float = 0.0
+    est_decay: float = 0.0          # expected decay today, per share
+    net_edge: float = 0.0           # est_decay − spread, per share
+    edge_pct: float = 0.0           # net_edge / strike
+    event_haircut: bool = False     # decay estimate halved for earnings
     distance_pct: float = 0.0
     outside_expected_move: bool = False
     support: Optional[float] = None
     spread_pct: float = 0.0
-    buy_back_at: float = 0.0
+    target_price: float = 0.0       # where the put trades if decay holds
     stop_at: float = 0.0
     assigned_cost: float = 0.0
     cash_required: float = 0.0
     score: float = 0.0
+    # Runner-up strikes for the "Compare strikes" table (best first).
+    alternatives: list = field(default_factory=list)
     has_no_trade: bool = False
     no_trade_reason: str = ""
     error: str = ""
@@ -235,6 +255,20 @@ def _pick_expiration(
     if not parsed:
         raise ValueError(f"No expiration within {max_dte} days.")
     return min(parsed, key=lambda pair: pair[1])
+
+
+def session_hours_left(now: Optional[datetime] = None) -> float:
+    """
+    Regular-session hours left to hold a same-day trade. Before the open
+    — or after the close, when planning for the next session — that's a
+    full 6.5-hour day.
+    """
+    now = (now or datetime.now(_MARKET_TZ)).astimezone(_MARKET_TZ)
+    t = now.time()
+    if t < _MARKET_OPEN or t >= _MARKET_CLOSE:
+        return SESSION_HOURS
+    close = datetime.combine(now.date(), _MARKET_CLOSE, tzinfo=_MARKET_TZ)
+    return max((close - now).total_seconds() / 3600.0, 0.0)
 
 
 def _atm_iv(contracts: list[OptionContract], spot: float) -> float:
@@ -458,33 +492,58 @@ def _scan_one(
     row.earnings_date = earnings_date
     row.earnings_warning = _earnings_in_window(earnings_date, expiration)
 
-    # 7. Best put
+    # 7. Best put for a same-day round trip
+    row.hours_left = session_hours_left(now)
     picks = score_premium_puts(
         puts, quote.price, dte,
+        hours_left=row.hours_left,
         iv_rank=row.iv_rank,
         expected_move=row.expected_move,
         supports=supports,
+        event_before_expiry=row.earnings_warning,
         params=params,
     )
     if not picks:
         row.has_no_trade = True
-        row.no_trade_reason = "No liquid OTM puts"
+        row.no_trade_reason = "No liquid put beats its spread today"
         return row
 
+    penalty = _DOWNTREND_PENALTY if row.downtrend else 0.0
     best = picks[0]
+    c = best.contract
     row.strike = best.strike
     row.credit = best.credit
+    row.bid, row.ask = c.bid, c.ask
+    row.volume, row.open_interest = c.volume or 0, c.open_interest or 0
     row.delta = best.delta
-    row.yield_per_day = best.yield_per_day
+    row.est_decay = best.est_decay
+    row.net_edge = best.net_edge
+    row.edge_pct = best.edge_pct
+    row.event_haircut = best.event_haircut
     row.distance_pct = best.distance_pct
     row.outside_expected_move = best.outside_expected_move
     row.support = best.support
     row.spread_pct = best.spread_pct
-    row.buy_back_at = best.buy_back_at
+    row.target_price = best.target_price
     row.stop_at = best.stop_at
     row.assigned_cost = best.assigned_cost
     row.cash_required = best.cash_required
-    row.score = max(0.0, best.score - (_DOWNTREND_PENALTY if row.downtrend else 0.0))
+    row.score = max(0.0, best.score - penalty)
+    row.alternatives = [
+        {
+            "strike": p.strike,
+            "bid": p.contract.bid,
+            "ask": p.contract.ask,
+            "spread_pct": p.spread_pct,
+            "volume": p.contract.volume or 0,
+            "open_interest": p.contract.open_interest or 0,
+            "delta": p.delta,
+            "est_decay": p.est_decay,
+            "net_edge": p.net_edge,
+            "score": max(0.0, p.score - penalty),
+        }
+        for p in picks[:_ALTERNATIVES]
+    ]
     return row
 
 
@@ -596,8 +655,10 @@ def _event_banner(row: ScanRow) -> str:
             f'<span style="{pill}background:#d29922;color:#0d1117;">'
             f"📅 EARNINGS {_when(ed).upper()}</span>"
             f"<b>{ed:%a %b %d}</b> — before this put expires. The high premium "
-            f"is earnings premium: expect a gap and an IV crush after the report."
-            f"{spike}</div>"
+            f"is earnings premium. Closing today keeps you out of the gap, but "
+            f"that premium won't bleed off intraday — it collapses after the "
+            f"report — so today's decay estimate is halved. If you can't close "
+            f"by {CLOSE_BY}, you're holding through earnings.{spike}</div>"
         )
     if row.iv_spike:
         return (
@@ -627,12 +688,15 @@ def _badges(row: ScanRow) -> str:
     return "  ·  ".join(out)
 
 
-def _plan_line(row: ScanRow, fits: Optional[int], profit_target: float) -> str:
+def _plan_line(row: ScanRow, fits: Optional[int]) -> str:
     discount = (row.price - row.assigned_cost) / row.price if row.price else 0.0
+    captured = row.est_decay / row.credit if row.credit else 0.0
     parts = [
-        f"🎯 Buy back at <b>${row.buy_back_at:.2f}</b> ({profit_target:.0%} profit)",
+        f"🎯 Target ~<b>${row.target_price:.2f}</b> by the close if the stock "
+        f"holds ({captured:.0%} of the credit)",
         f"🛑 Stop at <b>${row.stop_at:.2f}</b>",
-        f"🏠 If assigned: own 100 @ <b>${row.assigned_cost:,.2f}</b> net "
+        f"⏰ Close by <b>{CLOSE_BY}</b>",
+        f"🏠 Can't close? Assigned at <b>${row.assigned_cost:,.2f}</b> net "
         f"({discount:.1%} below today) · ${row.cash_required:,.0f} cash",
     ]
     if fits is not None:
@@ -643,9 +707,7 @@ def _plan_line(row: ScanRow, fits: Optional[int], profit_target: float) -> str:
     return "  ·  ".join(parts)
 
 
-def _render_row(
-    row: ScanRow, fits: Optional[int], profit_target: float,
-) -> None:
+def _render_row(row: ScanRow, fits: Optional[int]) -> None:
     """One scan result: a colour-coded card plus a Log action."""
     bg, border = _row_color(row)
     card_col, action_col = st.columns([13, 2])
@@ -692,13 +754,30 @@ def _render_row(
             _cell("Price", price_html, "1.3"),
             _cell("Expires", f"{row.expiration[5:]} · {row.dte}d", "1.1"),
             _cell("IV · Rank", iv_html, "1.1"),
-            _cell("Sell put", f"${row.strike:g}{delta_txt}", "1.3"),
-            _cell("Credit", f"${row.credit:.2f} <span style='font-size:11px;color:#8b949e;'>"
-                  f"(${row.credit * 100:,.0f})</span>", "1.3"),
-            _cell("Yield/day", f"{row.yield_per_day * 100:.2f}%", "0.9"),
-            _cell("OTM", f"{row.distance_pct * 100:.1f}%", "0.8"),
-            _cell("Spread", f"{row.spread_pct * 100:.0f}%", "0.7"),
-            _cell("Score", f'<span style="color:{border};">{row.score:.0f}</span>', "0.7"),
+            _cell("Sell put", f"${row.strike:g}{delta_txt}", "1.2"),
+            _cell(
+                "Bid / Ask",
+                f"${row.bid:.2f} / ${row.ask:.2f}"
+                f"<span style='font-size:11px;color:#8b949e;'> ({row.spread_pct * 100:.0f}%)</span>",
+                "1.5",
+            ),
+            _cell("Vol / OI", f"{row.volume:,} / {row.open_interest:,}", "1.1"),
+            _cell(
+                "Decay today",
+                f"${row.est_decay * 100:,.0f}" + (
+                    "<span style='font-size:11px;color:#d29922;'> (halved)</span>"
+                    if row.event_haircut else ""
+                ),
+                "0.9",
+            ),
+            _cell(
+                "Net edge",
+                f"${row.net_edge * 100:,.0f}"
+                f"<span style='font-size:11px;color:#8b949e;'> ({row.edge_pct * 100:.2f}%)</span>",
+                "1.2",
+            ),
+            _cell("OTM", f"{row.distance_pct * 100:.1f}%", "0.7"),
+            _cell("Score", f'<span style="color:{border};">{row.score:.0f}</span>', "0.6"),
         ])
         badges = _badges(row)
         st.markdown(
@@ -708,12 +787,15 @@ def _render_row(
             f"{_event_banner(row)}"
             f'<div style="display:flex;gap:14px;align-items:center;">{cells}</div>'
             f'<div style="font-size:12px;color:#c9d1d9;margin-top:6px;">'
-            f"{_plan_line(row, fits, profit_target)}</div>"
+            f"{_plan_line(row, fits)}</div>"
             + (f'<div style="font-size:11px;color:#d29922;margin-top:4px;">{badges}</div>'
                if badges else "")
             + "</div>",
             unsafe_allow_html=True,
         )
+        if len(row.alternatives) > 1:
+            with st.expander(f"Compare strikes — {row.ticker}"):
+                _render_alternatives(row)
 
     with action_col:
         if st.button(
@@ -736,12 +818,48 @@ def _render_row(
             )
 
 
+def _render_alternatives(row: ScanRow) -> None:
+    """Top strikes side by side, so the pick is explainable."""
+    st.dataframe(
+        [{
+            "Strike": a["strike"],
+            "Bid": a["bid"],
+            "Ask": a["ask"],
+            "Spread %": a["spread_pct"] * 100,
+            "Volume": a["volume"],
+            "Open int.": a["open_interest"],
+            "Delta": a["delta"],
+            "Decay today $": a["est_decay"] * 100,
+            "Net edge $": a["net_edge"] * 100,
+            "Score": a["score"],
+        } for a in row.alternatives],
+        hide_index=True, use_container_width=True,
+        column_config={
+            "Strike": st.column_config.NumberColumn(format="$%g"),
+            "Bid": st.column_config.NumberColumn(format="$%.2f"),
+            "Ask": st.column_config.NumberColumn(format="$%.2f"),
+            "Spread %": st.column_config.NumberColumn(format="%.1f%%"),
+            "Delta": st.column_config.NumberColumn(format="%.2f"),
+            "Decay today $": st.column_config.NumberColumn(format="$%.0f"),
+            "Net edge $": st.column_config.NumberColumn(format="$%.0f"),
+            "Score": st.column_config.NumberColumn(format="%.0f"),
+        },
+    )
+    st.caption(
+        "Per contract. Decay today = theta × session hours left, capped at 70% "
+        "of the credit. Net edge = decay − spread (you pay the spread "
+        "getting in and out). Score: net edge 35% · liquidity (spread, "
+        "volume, open interest) 25% · delta 20% · expected move 10% · "
+        "IV rank 5% · support 5%."
+    )
+
+
 def _render_summary(rows: list[ScanRow]) -> None:
     """Summary cards beneath the list."""
     tradeable = [r for r in rows if r.tradeable]
     top = max(tradeable, key=lambda r: r.score, default=None)
     richest = max(tradeable, key=lambda r: r.iv_rank, default=None)
-    best_yield = max(tradeable, key=lambda r: r.yield_per_day, default=None)
+    best_edge = max(tradeable, key=lambda r: r.net_edge * 100, default=None)
     strong = sum(1 for r in tradeable if r.score >= 70)
     earnings_ct = sum(1 for r in tradeable if r.earnings_warning)
 
@@ -757,13 +875,13 @@ def _render_summary(rows: list[ScanRow]) -> None:
         else:
             st.metric("🔥 Richest IV", "—")
     with c3:
-        if best_yield:
+        if best_edge:
             st.metric(
-                "💰 Most premium/day", best_yield.ticker,
-                f"{best_yield.yield_per_day * 100:.2f}%/day",
+                "💰 Biggest net edge", best_edge.ticker,
+                f"${best_edge.net_edge * 100:,.0f}/contract today",
             )
         else:
-            st.metric("💰 Most premium/day", "—")
+            st.metric("💰 Biggest net edge", "—")
     with c4:
         st.metric("✅ Strong setups", str(strong), "score ≥ 70")
     with c5:
@@ -844,20 +962,19 @@ def _render_controls(dp) -> dict:
     }
 
 
-def _exposure_fits():
+def _exposure_fits() -> Callable[[ScanRow], Optional[int]]:
     """
-    Returns (fits(row) -> Optional[int], profit_target). fits is None-valued
-    when no account size is set in the Ledger.
+    fits(row) → contracts of that put that fit the Ledger's exposure
+    limits, or None when no account size is set.
     """
     settings = ledger_ui.load_settings()
     account = float(settings.get("account_size") or 0)
-    profit_target = float(settings.get("profit_target") or 0.5)
     if account <= 0:
-        return (lambda row: None), profit_target
+        return lambda row: None
     try:
         _, ledger = ledger_ui.load_ledger()
     except Exception:  # noqa: BLE001
-        return (lambda row: None), profit_target
+        return lambda row: None
     report = compute_exposure(
         list(ledger.positions.values()), account,
         settings["max_ticker_pct"], settings["max_total_pct"],
@@ -868,7 +985,30 @@ def _exposure_fits():
             report, row.ticker, row.strike or 0.0,
             settings["max_ticker_pct"], settings["max_total_pct"],
         )
-    return fits, profit_target
+    return fits
+
+
+def _session_note(now: Optional[datetime] = None) -> tuple[str, bool]:
+    """(message, is_warning) describing the session for same-day trades."""
+    now = (now or datetime.now(_MARKET_TZ)).astimezone(_MARKET_TZ)
+    t = now.time()
+    if now.weekday() >= 5 or t >= _MARKET_CLOSE:
+        return ("Market closed — decay estimates are for the next full session.", False)
+    if t < _MARKET_OPEN:
+        return ("Market opens 9:30 am ET — estimates assume a full session.", False)
+    left = session_hours_left(now)
+    if left < 0.5:
+        return (
+            f"Under 30 minutes left in the session — too late to open a "
+            f"same-day trade (close by {CLOSE_BY}).",
+            True,
+        )
+    h, m = int(left), int(round((left - int(left)) * 60))
+    return (
+        f"Session: {h}h {m:02d}m left — decay estimates cover the rest of today. "
+        f"Close everything by {CLOSE_BY}.",
+        False,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -877,10 +1017,11 @@ def _exposure_fits():
 
 def render_scanner(dp=None) -> None:
     """Render the Daily Scanner tab."""
-    st.subheader("☀️ Daily Scanner — CSP Premium")
+    st.subheader("☀️ Daily Scanner — Same-Day CSP")
     st.caption(
-        "The richest put to sell right now on a stock you'd own — plan to buy "
-        "it back before expiration; assignment is the worst case."
+        "The best put to sell now and buy back before today's close, on a "
+        "stock you'd own — assignment is only the worst case if you can't "
+        "close. Ranked by what today's decay should earn after the spread."
     )
 
     if dp is None:
@@ -890,10 +1031,13 @@ def render_scanner(dp=None) -> None:
     cfg = _render_controls(dp)
     st.divider()
 
-    fits, profit_target = _exposure_fits()
-    params = PremiumParams(profit_target=profit_target)
+    fits = _exposure_fits()
+    params = PremiumParams()
 
-    cache_key = (tuple(cfg["watchlist"]), date.today().isoformat(), profit_target)
+    note, warn = _session_note()
+    (st.warning if warn else st.info)(note, icon="⏰")
+
+    cache_key = (tuple(cfg["watchlist"]), date.today().isoformat())
     cached_at: Optional[datetime] = st.session_state.get("scanner_scanned_at")
     cached_key = st.session_state.get("scanner_cache_key")
     rows: Optional[list[ScanRow]] = st.session_state.get("scanner_results")
@@ -956,7 +1100,7 @@ def render_scanner(dp=None) -> None:
         return
 
     for r in visible:
-        _render_row(r, fits(r) if r.tradeable else None, profit_target)
+        _render_row(r, fits(r) if r.tradeable else None)
 
     st.divider()
     _render_summary(rows)

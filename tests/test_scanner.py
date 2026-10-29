@@ -29,9 +29,11 @@ from ui.scanner import (
     _realized_vol,
     _resolve_earnings,
     _scan_one,
+    _session_note,
     _true_iv_rank,
     _when,
     apply_iv_floor,
+    session_hours_left,
     upcoming_earnings,
 )
 from data import store
@@ -208,7 +210,8 @@ class _FakeDP:
         def put(k, bid, ask, d):
             return OptionContract(strike=k, expiration=exp, option_type="put",
                                   bid=bid, ask=ask, last=bid, volume=500,
-                                  open_interest=1000, implied_volatility=0.45, delta=-d)
+                                  open_interest=1000, implied_volatility=0.45, delta=-d,
+                                  theta=-bid * 0.6)
         puts = [put(99, 1.40, 1.45, 0.40), put(97, 0.80, 0.83, 0.22),
                 put(95, 0.40, 0.42, 0.12), put(90, 0.04, 0.06, 0.03)]
         return [], puts
@@ -228,15 +231,21 @@ def test_scan_one_picks_a_put_and_builds_a_plan():
     assert row.tradeable
     assert row.expiration == _exp(2) and row.dte == 2
     assert row.strike in (97, 95)                 # 0.40Δ and 0.03Δ excluded
-    assert row.buy_back_at == pytest.approx(row.credit * 0.5, abs=0.01)
+    assert row.hours_left == pytest.approx(6.0)   # 10:00 am → 6h to the close
+    assert row.net_edge == pytest.approx(row.est_decay - (row.ask - row.bid))
+    assert row.target_price == pytest.approx(row.credit - row.est_decay, abs=0.01)
     assert row.assigned_cost == pytest.approx(row.strike - row.credit, abs=0.01)
     assert row.cash_required == row.strike * 100
-    assert not row.earnings_warning
+    assert row.alternatives and row.alternatives[0]["strike"] == row.strike
+    assert not row.earnings_warning and not row.event_haircut
 
 
-def test_scan_one_flags_but_allows_earnings():
+def test_scan_one_flags_but_allows_earnings_and_halves_decay():
+    plain = _scan_one(_FakeDP(), "TEST", now=MORNING)
     row = _scan_one(_FakeDP(earnings=_exp(1)), "TEST", now=MORNING)
-    assert row.tradeable and row.earnings_warning
+    assert row.tradeable and row.earnings_warning and row.event_haircut
+    if row.strike == plain.strike:
+        assert row.est_decay == pytest.approx(plain.est_decay / 2)
 
 
 def test_scan_one_no_trade_when_nothing_within_a_week():
@@ -406,3 +415,26 @@ def test_event_banner_explains_the_premium():
     assert "⚡ IV SPIKE" in html and "No earnings date found" in html
 
     assert _event_banner(ScanRow(ticker="X", atm_iv=0.3, realized_vol=0.3)) == ""
+
+
+# ── session timing ──────────────────────────────
+
+def test_session_hours_left():
+    assert session_hours_left(_at(8)) == 6.5            # before the open
+    assert session_hours_left(_at(9, 30)) == pytest.approx(6.5)
+    assert session_hours_left(_at(13)) == pytest.approx(3.0)
+    assert session_hours_left(_at(15, 45)) == pytest.approx(0.25)
+    assert session_hours_left(_at(17)) == 6.5           # planning the next session
+
+
+def test_session_note_warns_in_the_last_half_hour():
+    weekday = date.today()
+    while weekday.weekday() >= 5:
+        weekday += timedelta(days=1)
+    at = lambda h, m=0: datetime.combine(weekday, time(h, m), tzinfo=_MARKET_TZ)
+    msg, warn = _session_note(at(15, 40))
+    assert warn and "too late" in msg
+    msg, warn = _session_note(at(11))
+    assert not warn and "5h 00m left" in msg
+    assert "opens" in _session_note(at(8))[0]
+    assert "closed" in _session_note(at(16, 30))[0]

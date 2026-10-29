@@ -14,7 +14,7 @@ real-time option chain data, technical chart analysis, and a weighted scoring en
 | **Technical Chart** | Candlestick + SMA 20/50 + support/resistance + strike overlays + volume |
 | **Recommendations** | Top 3 strikes labelled Safest Income / Best Balance / Max Premium with plain-English explanations |
 | **Ranked Table** | All qualifying strikes scored and sortable |
-| **Daily Scanner** | CSP premium mode: the richest put on the earliest expiration (≤ 7 days) for 33 quality names, with buy-back target, stop and cost if assigned; true IV rank after 20 days of stored IV; earnings flagged |
+| **Daily Scanner** | Same-day CSP mode: the put to sell now and buy back before the close, ranked by today's expected decay after the spread, with liquidity, delta and a compare-strikes table; earnings flagged; earliest expiration ≤ 7 days |
 | **📒 Ledger** | Wheel journal: open positions, adjusted cost basis, exit alerts, exposure vs account size, premium by month, closed-cycle returns, CSV export |
 | **Manage Position** | Roll vs assign engine; one click from a Ledger position pre-fills it |
 

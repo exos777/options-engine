@@ -293,18 +293,59 @@ def test_chart_structure_near_support():
 
 # ── pick_top_rolls bucketing ────────────────────
 
-def test_pick_top_rolls_buckets_by_delta():
+def test_pick_top_rolls_never_repeats_balanced_as_safe():
+    """When the lowest-delta roll also scores best, it is Balanced — and
+    there is nothing safer, so Safe is empty rather than a duplicate."""
     pos = make_csp()
-    safe = make_roll(strike=350, roll_credit=0.40, delta=0.12)
-    balanced = make_roll(strike=365, roll_credit=0.90, delta=0.22)
+    low = make_roll(strike=350, roll_credit=0.40, delta=0.12)
+    mid = make_roll(strike=365, roll_credit=0.90, delta=0.22)
     aggro = make_roll(strike=368, roll_credit=1.40, delta=0.32)
-    picks = pick_top_rolls([safe, balanced, aggro], pos, underlying_price=370.0)
+    picks = pick_top_rolls([low, mid, aggro], pos, underlying_price=370.0)
 
-    assert picks.safe is not None
-    assert picks.balanced is not None
+    assert picks.balanced is low
+    assert picks.safe is None
     assert picks.premium is not None
     assert picks.aggressive is picks.premium  # alias still works
-    assert picks.safe.delta <= SAFE_DELTA_MAX
+
+
+def test_safe_is_farther_otm_and_still_collects_a_credit():
+    pos = make_csp()
+    mid = make_roll(strike=365, roll_credit=0.90, delta=0.22)
+    aggro = make_roll(strike=368, roll_credit=1.40, delta=0.32)
+    later = "2026-05-09"
+    safer = make_roll(strike=355, expiration=later, dte=17, roll_credit=0.60, delta=0.12)
+    debit = make_roll(strike=345, expiration=later, dte=17, roll_credit=-0.10, delta=0.08)
+    closer = make_roll(strike=368, expiration=later, dte=17, roll_credit=2.00, delta=0.30)
+    picks = pick_top_rolls(
+        [mid, aggro], pos, underlying_price=370.0,
+        safe_candidates=[safer, debit, closer],
+    )
+    assert picks.balanced is mid
+    assert picks.safe is safer                     # lower strike, credit, lowest Δ
+    assert picks.safe.strike < picks.balanced.strike
+    assert picks.score_for(picks.safe) is not None
+    # Balanced / Premium stay on the chosen Leg 2 expiration.
+    assert picks.premium.expiration == mid.expiration
+
+
+def test_safe_prefers_real_premium_within_the_low_delta_zone():
+    """A very safe strike that still pays beats the most remote one for pennies."""
+    pos = make_csp()
+    mid = make_roll(strike=365, roll_credit=0.90, delta=0.22)
+    paying = make_roll(strike=355, roll_credit=0.80, delta=0.13)
+    remote = make_roll(strike=345, roll_credit=0.06, delta=0.08)
+    picks = pick_top_rolls([mid], pos, underlying_price=370.0,
+                           safe_candidates=[paying, remote])
+    assert picks.safe is paying
+
+
+def test_safe_falls_back_to_lowest_delta_above_the_zone():
+    pos = make_csp(strike=372)
+    bal = make_roll(strike=371, roll_credit=1.00, delta=0.30)
+    a = make_roll(strike=369, roll_credit=0.50, delta=0.26)
+    b = make_roll(strike=368, roll_credit=0.30, delta=0.24)
+    picks = pick_top_rolls([bal], pos, underlying_price=373.0, safe_candidates=[a, b])
+    assert picks.safe is b
 
 
 def test_pick_top_rolls_handles_empty():
@@ -323,14 +364,17 @@ def test_pick_top_rolls_rejects_all_high_delta_returns_empty():
     assert picks.premium is None
 
 
-def test_safe_falls_back_when_no_low_delta_candidate():
-    """When no candidate has |delta| <= SAFE_DELTA_MAX, fall back to lowest delta."""
+def test_safe_empty_when_no_safer_roll_collects_a_credit():
     pos = make_csp()
     a = make_roll(strike=372, roll_credit=1.05, delta=0.32)
     b = make_roll(strike=370, roll_credit=0.80, delta=0.28)
     picks = pick_top_rolls([a, b], pos, underlying_price=375.0)
-    assert picks.safe is not None
-    assert picks.safe.delta == 0.28
+    assert picks.balanced is not None
+    lower = [c for c in (a, b) if c.strike < picks.balanced.strike]
+    if lower:
+        assert picks.safe in lower
+    else:
+        assert picks.safe is None
 
 
 def test_premium_excludes_itm_strikes_for_cc():

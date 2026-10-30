@@ -59,9 +59,13 @@ class EventContext:
     @property
     def earnings_before_leg2(self) -> bool:
         """Report lands before the NEW short expires (rolling into it)."""
+        return self.earnings_before(self.leg2_expiration)
+
+    def earnings_before(self, expiration: date) -> bool:
+        """Report lands on/before *expiration* (a manual flag counts too)."""
         if self.earnings_date is None:
             return self.earnings_flagged
-        return self.today <= self.earnings_date <= self.leg2_expiration
+        return self.today <= self.earnings_date <= expiration
 
     # -- baseline volatility ------------------------------------------------
 
@@ -114,12 +118,18 @@ def assess_candidate(
     dte: int,
     strategy: str,
     ctx: EventContext,
+    expiration: Optional[date] = None,
 ) -> CandidateEvent:
-    """Classify a candidate against the event context and adjust its credit."""
+    """
+    Classify a candidate against the event context and adjust its credit.
+    *expiration* is the candidate's own expiry (defaults to Leg 2's) — a
+    later expiration offered as a Safe alternative may span the report
+    even when the chosen Leg 2 doesn't.
+    """
     credit = sell_to_open - buy_to_close
     out = CandidateEvent(adjusted_credit=credit)
 
-    if ctx.earnings_before_leg2:
+    if ctx.earnings_before(expiration or ctx.leg2_expiration):
         out.kind = "earnings"
     elif ctx.term_spike(leg2_iv):
         out.kind = "iv_spike"

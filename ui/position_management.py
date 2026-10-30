@@ -255,6 +255,11 @@ def _fetch_roll_candidates(
 
 def _do_fetch(dp, ticker: str, expiration: str, strike: float, strategy: str) -> None:
     """Fetch live quote + option data for the selected expiration/strike."""
+    # Clear the previous contract's quote first: a failed lookup must never
+    # leave another contract's bid/ask behind to be used as the close price.
+    for k in ("pm_auto_bid", "pm_auto_ask", "pm_auto_iv", "pm_auto_delta"):
+        st.session_state[k] = 0.0
+    st.session_state["pm_btc"] = 0.0
     try:
         quote = dp.get_quote(ticker)
         st.session_state["pm_auto_price"] = quote.price
@@ -278,6 +283,8 @@ def _do_fetch(dp, ticker: str, expiration: str, strike: float, strategy: str) ->
             contract = selected.contract
             st.session_state["pm_auto_bid"] = contract.bid
             st.session_state["pm_auto_ask"] = contract.ask
+            # Buying back a short pays the ask.
+            st.session_state["pm_btc"] = float(contract.ask)
             st.session_state["pm_auto_iv"] = contract.implied_volatility or 0.0
             st.session_state["pm_auto_delta"] = (
                 abs(contract.delta) if contract.delta else 0.0
@@ -293,6 +300,19 @@ def _do_fetch(dp, ticker: str, expiration: str, strike: float, strategy: str) ->
     except Exception as e:
         st.session_state["pm_fetch_ok"] = False
         st.session_state["pm_fetch_err"] = str(e)
+
+
+def _btc_known(current_ask: float) -> bool:
+    """Every roll nets against the buy-to-close price — refuse to guess it."""
+    if current_ask > 0:
+        return True
+    st.error(
+        "Buy-to-close price for Leg 1 is $0, so roll credits would leave out "
+        "the cost of closing your current option. Click **🔄 Fetch Live "
+        "Data**, or enter the Leg 1 ask from your broker.",
+        icon="🚨",
+    )
+    return False
 
 
 def render_position_manager(dp=None) -> None:
@@ -395,24 +415,18 @@ def render_position_manager(dp=None) -> None:
         )
         times_rolled = 0
 
-    # ── Auto-fetch on button press ─────────────────────
-    if fetch_btn and dp is not None and ticker and expiration:
+    # ── Fetch Leg 1's live quote ───────────────────────
+    # On the button, and whenever the contract on screen hasn't been fetched
+    # yet — including the first render after saved values or a Ledger
+    # pre-fill load. Otherwise its ask stays $0 and every roll looks like
+    # closing the current leg is free.
+    fetch_key = f"{ticker}_{expiration}_{strike}_{strategy}"
+    if dp is not None and ticker and expiration and (
+        fetch_btn or st.session_state.get("pm_fetched_key") != fetch_key
+    ):
         with st.spinner(f"Fetching {ticker} {expiration} data…"):
             _do_fetch(dp, ticker, expiration, strike, strategy)
-
-    # ── Auto-fetch when key inputs change ──────────────
-    fetch_key = f"{ticker}_{expiration}_{strike}_{strategy}"
-    prev_key = st.session_state.get("pm_last_fetch_key", "")
-    if (
-        dp is not None
-        and ticker
-        and expiration
-        and fetch_key != prev_key
-        and prev_key != ""
-    ):
-        _do_fetch(dp, ticker, expiration, strike, strategy)
-    if ticker and expiration:
-        st.session_state["pm_last_fetch_key"] = fetch_key
+        st.session_state["pm_fetched_key"] = fetch_key
 
     # ── Live-data status ───────────────────────────────
     _has_auto = st.session_state.get("pm_fetch_ok", False)
@@ -437,7 +451,15 @@ def render_position_manager(dp=None) -> None:
 
     with col_mid:
         current_bid = float(st.session_state.get("pm_auto_bid", 0.0))
-        current_ask = float(st.session_state.get("pm_auto_ask", 0.0))
+        current_ask = st.number_input(
+            "Buy to Close — Leg 1 ask ($)",
+            min_value=0.0, step=0.01, key="pm_btc",
+            help="What it costs to buy back the current short — its ask. "
+                 "Filled from live data; override with your broker's quote.",
+        )
+        # A manual override has no matching bid: treat the ask as the mid.
+        if current_bid <= 0 or current_bid > current_ask:
+            current_bid = current_ask
         implied_vol = float(st.session_state.get("pm_auto_iv", 0.0))
         close_mode = "realistic"
 
@@ -500,7 +522,7 @@ def render_position_manager(dp=None) -> None:
     if st.button(
         "\U0001f9e0 Evaluate Position",
         type="primary", use_container_width=True, key="pm_eval",
-    ):
+    ) and _btc_known(current_ask):
         pos = OpenPosition(
             strategy=strategy,
             strike=strike,
@@ -672,17 +694,26 @@ def _render_roll_math_card(
     sto = best_roll.sell_to_open
     net = sto - btc
 
+    kind = "P" if pos.strategy == "CSP" else "C"
     st.markdown("**Roll Math**")
     m1, m2, m3 = st.columns(3)
     with m1:
-        st.metric("Sell to Open", f"${sto:.2f}")
+        st.metric("Buy to Close · Leg 1", f"${btc:.2f}")
+        st.caption(f"${pos.strike:g}{kind} — current short, pay the ask")
     with m2:
-        st.metric("Buy to Close", f"${btc:.2f}")
+        st.metric("Sell to Open · Leg 2", f"${sto:.2f}")
+        st.caption(
+            f"${best_roll.strike:g}{kind} exp {best_roll.expiration} — receive the bid"
+        )
     with m3:
         if net >= 0:
             st.metric("Net Credit", f"+${net:.2f}")
         else:
             st.metric("Net Debit", f"-${abs(net):.2f}")
+        st.caption(
+            f"${sto:.2f} − ${btc:.2f} = {'+' if net >= 0 else '−'}${abs(net):.2f} "
+            f"per share (${abs(net) * 100:,.0f} per contract)"
+        )
 
     # Outcome line
     st.markdown("**If rolled and later assigned:**")

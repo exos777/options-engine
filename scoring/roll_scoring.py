@@ -33,6 +33,7 @@ defaults to neutral and the structure sub-score defaults to 50.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import date
 from typing import Literal, Optional
 
 from scoring.roll_events import CandidateEvent, EventContext, assess_candidate
@@ -70,6 +71,7 @@ DEFAULT_MIN_OPEN_INTEREST = 50
 SAFE_DELTA_MAX = 0.20
 DELTA_HARD_CAP = 0.35           # reject |delta| >= this
 DELTA_PENALTY_MAX = 25.0        # max points subtracted from composite
+MIN_SAFE_CREDIT = 0.05          # Safe must still collect at least this
 
 
 # ---------------------------------------------------------------------------
@@ -114,6 +116,14 @@ class RollPicks:
     premium: Optional[RollCandidate] = None
     score_by_strike: dict[float, RollScore] = field(default_factory=dict)
     all_scored: list[tuple[RollCandidate, RollScore]] = field(default_factory=list)
+    # Keyed by (strike, expiration): Safe may come from a later expiration
+    # that shares a strike with a Leg 2 candidate.
+    scores: dict[tuple[float, str], RollScore] = field(default_factory=dict)
+
+    def score_for(self, cand: Optional[RollCandidate]) -> Optional[RollScore]:
+        if cand is None:
+            return None
+        return self.scores.get((cand.strike, cand.expiration)) or self.score_by_strike.get(cand.strike)
 
     @property
     def aggressive(self) -> Optional[RollCandidate]:
@@ -410,6 +420,7 @@ def score_roll_candidate(
             dte=candidate.dte,
             strategy=pos.strategy,
             ctx=event_ctx,
+            expiration=_parse_exp(candidate.expiration),
         )
         if event.reject_reason:
             return RollScore(
@@ -518,6 +529,13 @@ def score_roll_candidate(
     )
 
 
+def _parse_exp(value: str) -> Optional[date]:
+    try:
+        return date.fromisoformat(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _event_phrase(event: CandidateEvent, ctx: EventContext) -> str:
     """e.g. 'spans earnings Nov 06 — strike outside the ±$18.20 move, $1.10 of the credit is event premium'."""
     what = (
@@ -618,9 +636,18 @@ def format_roll_recommendation(
 # Picker
 # ---------------------------------------------------------------------------
 
+def _farther_otm(cand: RollCandidate, ref: RollCandidate, strategy: str) -> bool:
+    """Strictly further from the money than *ref* (lower put / higher call)."""
+    if strategy == "CC":
+        return cand.strike > ref.strike
+    return cand.strike < ref.strike
+
+
 def pick_top_rolls(
     candidates: list[RollCandidate],
     pos: OpenPosition,
+    *,
+    safe_candidates: Optional[list[RollCandidate]] = None,
     **kwargs,
 ) -> RollPicks:
     """
@@ -629,9 +656,14 @@ def pick_top_rolls(
       balanced — highest composite score overall (highest premium does
                  NOT auto-win — it has to clear the weighted blend with
                  acceptable delta penalty).
-      safe     — lowest |delta|, preferring |delta| <= SAFE_DELTA_MAX.
-                 Falls back to the absolute lowest-delta scored candidate
-                 so Safe is never empty when any roll passes filters.
+      safe     — genuinely safer than Balanced: a strike strictly farther
+                 OTM that still collects a net credit (≥ MIN_SAFE_CREDIT);
+                 the best-scoring one with |delta| <= SAFE_DELTA_MAX, else
+                 the lowest |delta|. It may come from *safe_candidates*
+                 — later expirations, since going further out in time is
+                 how a farther-OTM roll still pays a credit. None when
+                 no safer roll collects a credit; Safe never repeats
+                 Balanced.
       premium  — highest net credit among non-ITM scored candidates.
                  Forced distinct from balanced when an alternative exists.
                  All hard filters (incl. |delta| < 0.35) still apply, so
@@ -654,13 +686,28 @@ def pick_top_rolls(
 
     balanced = by_score[0][0]
 
-    safe_bucket = [
-        (c, s) for c, s in by_score if abs(c.delta) <= SAFE_DELTA_MAX
+    extra_scored: list[tuple[RollCandidate, RollScore]] = []
+    for c in safe_candidates or []:
+        s = score_roll_candidate(c, pos, **kwargs)
+        if not s.rejected:
+            extra_scored.append((c, s))
+
+    safe_pool = [
+        (c, s) for c, s in scored + extra_scored
+        if c is not balanced
+        and _farther_otm(c, balanced, pos.strategy)
+        and c.roll_credit >= MIN_SAFE_CREDIT
     ]
-    if safe_bucket:
-        safe = safe_bucket[0][0]
+    # Within the low-delta zone, the best composite wins — it weighs credit,
+    # so Safe still pays real premium rather than the most remote strike
+    # for pennies. Only if nothing is that low, take the lowest delta.
+    low_delta = [(c, s) for c, s in safe_pool if abs(c.delta) <= SAFE_DELTA_MAX]
+    if low_delta:
+        safe = max(low_delta, key=lambda pair: (pair[1].score, pair[0].roll_credit))[0]
+    elif safe_pool:
+        safe = min(safe_pool, key=lambda pair: (abs(pair[0].delta), -pair[0].roll_credit))[0]
     else:
-        safe = min(scored, key=lambda pair: abs(pair[0].delta))[0]
+        safe = None
 
     underlying_price = float(kwargs.get("underlying_price", 0.0) or 0.0)
     if underlying_price > 0:
@@ -690,4 +737,7 @@ def pick_top_rolls(
         premium=premium,
         score_by_strike=score_by_strike,
         all_scored=by_score,
+        scores={
+            (c.strike, c.expiration): s for c, s in scored + extra_scored
+        },
     )

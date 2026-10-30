@@ -564,11 +564,16 @@ def render_position_manager(dp=None) -> None:
             cost_basis=cost_basis,
         )
 
+        safe_cands: list[RollCandidate] = []
         if dp is not None and ticker and leg2_expiration:
             with st.spinner(f"Fetching {leg2_expiration} roll candidates…"):
                 roll_cands = _fetch_roll_candidates(
                     dp, ticker, pos, leg2_expiration,
                 )
+                # Going further out in time is how a farther-OTM roll still
+                # pays a credit — offer those as Safe alternatives.
+                for later in _later_expirations(exp_list, leg2_expiration):
+                    safe_cands += _fetch_roll_candidates(dp, ticker, pos, later)
             indicators_obj, supports, resistances = _fetch_chart_context(
                 dp, ticker, current_price,
             )
@@ -627,9 +632,29 @@ def render_position_manager(dp=None) -> None:
             has_earnings=has_earnings,
             event_ctx=event_ctx,
             expirations=exp_list,
+            safe_candidates=safe_cands,
         )
 
     _save_pm_prefs()
+
+
+def _later_expirations(
+    expirations: list[str], leg2: str, max_dte: int = 21, limit: int = 2,
+) -> list[str]:
+    """The next *limit* expirations after Leg 2, within the 21-DTE roll window."""
+    out: list[str] = []
+    for exp in sorted(expirations or []):
+        if exp <= leg2:
+            continue
+        try:
+            if days_to_expiration(exp) > max_dte:
+                break
+        except Exception:
+            continue
+        out.append(exp)
+        if len(out) == limit:
+            break
+    return out
 
 
 def _build_event_context(
@@ -746,6 +771,7 @@ def _render_decision(
     has_earnings: bool = False,
     event_ctx: EventContext | None = None,
     expirations: list[str] | None = None,
+    safe_candidates: list[RollCandidate] | None = None,
 ) -> None:
     _render_event_panel(
         event_ctx, decision.roll_candidates, expirations or [], pos.strategy,
@@ -760,6 +786,7 @@ def _render_decision(
         underlying_price=current_price,
         has_earnings=has_earnings,
         event_ctx=event_ctx,
+        safe_candidates=safe_candidates or [],
     )
     best_roll = picks.balanced
     verdict = roll_vs_assign_verdict(pos, best_roll)
@@ -768,7 +795,7 @@ def _render_decision(
     # If we have a scored roll, replace the verdict's terse explanation
     # with the richer one that names the contributing factors.
     if best_roll is not None and verdict["recommendation"] == "ROLL":
-        bal_score = picks.score_by_strike.get(best_roll.strike)
+        bal_score = picks.score_for(best_roll)
         if bal_score is not None:
             verdict["explanation"] = format_roll_recommendation(
                 best_roll, pos, bal_score, bucket="balanced",
@@ -898,10 +925,17 @@ def _render_roll_alternatives(picks: RollPicks, pos: OpenPosition) -> None:
         with col:
             if cand is None:
                 st.markdown(f"**{label}**")
-                st.caption("No qualifying candidate.")
+                if bucket == "safe" and picks.balanced is not None:
+                    st.caption(
+                        "No roll farther out of the money than Balanced still "
+                        "collects a credit — this week or the next two. "
+                        "Balanced is already the safest credit roll."
+                    )
+                else:
+                    st.caption("No qualifying candidate.")
                 continue
 
-            score = picks.score_by_strike.get(cand.strike)
+            score = picks.score_for(cand)
             score_val = score.score if score else 0.0
             credit_sign = "+" if cand.roll_credit >= 0 else "-"
 
@@ -929,6 +963,12 @@ def _render_roll_alternatives(picks: RollPicks, pos: OpenPosition) -> None:
                 f"${cand.strike:.2f}",
                 f"{cand.dte} DTE · |Δ| {cand.delta:.2f}",
             )
+            if picks.balanced is not None and cand.expiration != picks.balanced.expiration:
+                st.caption(
+                    f"🗓️ Expires **{cand.expiration}** — further out than "
+                    f"Leg 2 ({picks.balanced.expiration}) so the lower strike "
+                    f"still pays a credit."
+                )
             st.metric(
                 "Net " + ("Credit" if cand.roll_credit >= 0 else "Debit"),
                 f"{credit_sign}${abs(cand.roll_credit):.2f}",

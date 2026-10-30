@@ -118,6 +118,24 @@ CC:
 - DTE > 21 → NO TRADE
 - Weekly regime strongly bearish (CSP) → NO TRADE
 
+## Roll Events (Manage Position)
+
+Rolls are priced with events in mind (`scoring/roll_events.py`):
+
+- Earnings date is auto-detected (Tradier → yfinance) and checked
+  against BOTH legs. Earnings before Leg 1 expires: buying back now pays
+  event premium — prefer waiting for the IV crush unless tested.
+- An event with no known date is detected from the term structure: Leg 2
+  IV ≥ 1.3× the no-event baseline (Leg 1 IV if Leg 1 ends first, else
+  20-day realised vol).
+- Event move = spot × √((IV₂² − base²) × DTE₂/365).
+- Leg 2 strike INSIDE the event move → rejected (the report likely tests
+  it). Outside → allowed with a −10 penalty, and the premium sub-score
+  uses the credit with the event premium stripped out.
+- Earnings with no measurable move (no IV data) → rejected, per the hard
+  filter "Earnings inside DTE window".
+- The panel names the last expiration before the report to avoid it.
+
 ## Daily Scanner — Same-Day CSP Mode
 
 The Daily Scanner tab is a separate mode for selling a put and buying
@@ -185,6 +203,7 @@ App must always answer:
 - `ui/recommendations.py` — Streamlit card rendering
 - `scoring/csp_premium.py` — same-day CSP scorer (Daily Scanner)
 - `ui/scanner.py` — Daily Scanner tab, same-day CSP mode (records ATM IV daily for true IV rank)
+- `scoring/roll_events.py` — earnings / IV-event awareness for rolls (event move, event-adjusted credit)
 - `ui/ledger.py` — Ledger tab (journal, alerts, exposure, performance)
 - `app/main.py` — Streamlit entry point
 - `config.py` — secrets loader (dotenv)

@@ -111,12 +111,14 @@ def test_csp_rejects_dte_outside_window():
     assert score_roll_candidate(c_long, pos).rejected
 
 
-def test_csp_rejects_when_earnings_in_window():
+def test_csp_keeps_rolls_through_earnings_but_scores_them_lower():
+    """Earnings never remove a roll — the trader wants all three picks."""
     pos = make_csp()
     c = make_roll()
-    s = score_roll_candidate(c, pos, has_earnings=True)
-    assert s.rejected
-    assert "Earnings" in s.rejection_reason
+    flagged = score_roll_candidate(c, pos, has_earnings=True)
+    plain = score_roll_candidate(c, pos)
+    assert not flagged.rejected
+    assert flagged.score < plain.score
 
 
 def test_rejects_high_delta_hard_cap():
@@ -293,19 +295,28 @@ def test_chart_structure_near_support():
 
 # ── pick_top_rolls bucketing ────────────────────
 
-def test_pick_top_rolls_never_repeats_balanced_as_safe():
-    """When the lowest-delta roll also scores best, it is Balanced — and
-    there is nothing safer, so Safe is empty rather than a duplicate."""
+def test_pick_top_rolls_gives_three_distinct_picks():
+    """The top roll is also the farthest OTM — it becomes Safe, the next
+    best becomes Balanced, and Premium takes the most credit of the rest."""
     pos = make_csp()
     low = make_roll(strike=350, roll_credit=0.40, delta=0.12)
     mid = make_roll(strike=365, roll_credit=0.90, delta=0.22)
     aggro = make_roll(strike=368, roll_credit=1.40, delta=0.32)
     picks = pick_top_rolls([low, mid, aggro], pos, underlying_price=370.0)
 
-    assert picks.balanced is low
-    assert picks.safe is None
-    assert picks.premium is not None
+    assert picks.safe is low
+    assert picks.balanced is mid
+    assert picks.premium is aggro
     assert picks.aggressive is picks.premium  # alias still works
+
+
+def test_two_rolls_never_duplicate():
+    pos = make_csp()
+    low = make_roll(strike=350, roll_credit=0.40, delta=0.12)
+    mid = make_roll(strike=365, roll_credit=0.90, delta=0.22)
+    picks = pick_top_rolls([low, mid], pos, underlying_price=370.0)
+    shown = [c for c in (picks.safe, picks.balanced, picks.premium) if c is not None]
+    assert len(shown) == len({id(c) for c in shown}) == 2
 
 
 def test_safe_is_farther_otm_and_still_collects_a_credit():
@@ -393,8 +404,12 @@ def test_premium_excludes_itm_strikes_for_cc():
         strike=420, roll_credit=0.60, delta=0.15,
         open_interest=500, spread_pct=0.04,
     )
+    otm_mid = make_roll(
+        strike=410, roll_credit=1.80, delta=0.25,
+        open_interest=500, spread_pct=0.04,
+    )
     picks = pick_top_rolls(
-        [itm_juicy, otm_solid, otm_safe], pos,
+        [itm_juicy, otm_solid, otm_safe, otm_mid], pos,
         underlying_price=400.0,
     )
     assert picks.premium is not None

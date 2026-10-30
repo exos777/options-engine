@@ -10,6 +10,8 @@ import pytest
 from scoring.position_decision import OpenPosition, RollCandidate
 from scoring.roll_events import (
     EVENT_PENALTY,
+    INSIDE_MOVE_PENALTY,
+    RV_TO_IV,
     EventContext,
     assess_candidate,
     implied_event_move,
@@ -45,7 +47,8 @@ def test_where_earnings_fall():
 
 def test_baseline_iv_skips_a_leg1_that_contains_the_event():
     assert _ctx(date(2026, 11, 10)).base_iv == 0.30          # Leg 1 clean
-    assert _ctx(date(2026, 11, 4)).base_iv == 0.28           # Leg 1 has it → realised
+    # Leg 1 holds the event → realised vol, scaled to a normal IV level.
+    assert _ctx(date(2026, 11, 4)).base_iv == pytest.approx(0.28 * RV_TO_IV)
 
 
 def test_implied_event_move():
@@ -70,13 +73,17 @@ def test_no_event_leaves_credit_alone():
     assert ev.penalty == 0 and not ev.reject_reason
 
 
-def test_strike_inside_earnings_move_is_rejected():
+def test_strike_inside_earnings_move_is_kept_but_penalized():
     ctx = _ctx(date(2026, 11, 10))
     move = implied_event_move(100, 0.60, 0.30, 14)            # ≈ $10.0
     ev = _assess(95, 0.60, ctx)
     assert ev.kind == "earnings" and ev.inside_move
     assert ev.event_move == pytest.approx(move)
-    assert "earnings move" in ev.reject_reason
+    assert ev.reject_reason == ""
+    assert ev.penalty == INSIDE_MOVE_PENALTY
+    # How much earnings raised IV: 60% vs 30% normal.
+    assert ev.iv_increase_pts == pytest.approx(0.30)
+    assert ev.iv_increase_pct == pytest.approx(1.0)
 
 
 def test_strike_outside_earnings_move_is_allowed_with_adjusted_credit():
@@ -94,10 +101,12 @@ def test_call_side_uses_the_upper_move():
     assert not _assess(115, 0.60, ctx, strategy="CC").inside_move
 
 
-def test_unmeasurable_earnings_stay_strict():
+def test_unmeasurable_earnings_are_flagged_not_rejected():
     ctx = _ctx(date(2026, 11, 10), leg1_iv=0.0, rv=0.0)
     ev = _assess(85, 0.0, ctx)
-    assert "no IV to size the move" in ev.reject_reason
+    assert ev.kind == "earnings" and ev.reject_reason == ""
+    assert ev.penalty == EVENT_PENALTY
+    assert ev.iv_increase_pts == 0.0
 
 
 def test_iv_term_spike_without_a_date_is_treated_as_an_event():
@@ -128,25 +137,30 @@ POS = OpenPosition(strategy="CSP", strike=98, original_premium=2.5,
                    current_bid=1.9, current_ask=2.0)
 
 
-def test_scorer_rejects_inside_move_and_penalizes_outside():
+def test_scorer_keeps_event_rolls_and_ranks_inside_the_move_lowest():
     ctx = _ctx(date(2026, 11, 10))
     inside = score_roll_candidate(_cand(95, 4.0, 0.60), POS, underlying_price=100,
                                   event_ctx=ctx)
-    assert inside.rejected and "earnings move" in inside.rejection_reason
-
     outside_event = score_roll_candidate(_cand(88, 3.0, 0.60), POS,
                                          underlying_price=100, event_ctx=ctx)
     no_event = score_roll_candidate(_cand(88, 3.0, 0.30), POS,
                                     underlying_price=100, event_ctx=_ctx())
-    assert not outside_event.rejected
+    assert not inside.rejected and not outside_event.rejected
+    assert inside.event.penalty > outside_event.event.penalty
     assert outside_event.score < no_event.score
     assert "spans earnings Nov 10" in outside_event.explanation
-    assert "event premium" in outside_event.explanation
+    assert "IV +30 pts / +100% from earnings" in outside_event.explanation
+    assert "strike INSIDE" in inside.explanation
+    assert "event premium" not in outside_event.explanation   # says "earnings premium"
+    assert "earnings premium" in outside_event.explanation
 
 
-def test_scorer_without_context_keeps_the_legacy_earnings_rule():
+def test_scorer_without_context_flags_earnings_instead_of_rejecting():
     s = score_roll_candidate(_cand(88, 3.0, 0.60), POS, has_earnings=True)
-    assert s.rejected and "Earnings" in s.rejection_reason
+    plain = score_roll_candidate(_cand(88, 3.0, 0.60), POS)
+    assert not s.rejected
+    assert s.score < plain.score
+    assert "spans earnings" in s.explanation
 
 
 # ── the reported case: Leg 1 expiring tomorrow, earnings Tue Nov 03 ──
@@ -164,7 +178,7 @@ def _near_ctx(leg1_iv=0.80, rv=0.35, earnings=date(2026, 11, 3)):
 
 def test_a_leg1_about_to_expire_is_not_the_baseline():
     """1-DTE IV is noisy and inflated — use realised vol instead."""
-    assert _near_ctx().base_iv == 0.35
+    assert _near_ctx().base_iv == pytest.approx(0.35 * RV_TO_IV)
     assert _ctx(date(2026, 11, 10)).base_iv == 0.30      # 7 DTE Leg 1 still used
 
 
@@ -172,7 +186,7 @@ def test_reported_case_measures_the_move_instead_of_rejecting_everything():
     ctx = _near_ctx()
     move, basis = measure_event_move(ctx, 0.55, 7)
     assert basis == "event"
-    assert move == pytest.approx(implied_event_move(100, 0.55, 0.35, 7))
+    assert move == pytest.approx(implied_event_move(100, 0.55, 0.35 * RV_TO_IV, 7))
     far = assess_candidate(strike=90, sell_to_open=1.2, buy_to_close=1.0,
                            leg2_iv=0.55, dte=7, strategy="CSP", ctx=ctx)
     assert not far.reject_reason and far.penalty == EVENT_PENALTY
@@ -187,7 +201,9 @@ def test_inseparable_event_falls_back_to_the_whole_expected_move():
                               leg2_iv=0.30, dte=7, strategy="CSP", ctx=ctx)
     outside = assess_candidate(strike=94, sell_to_open=0.6, buy_to_close=0.4,
                                leg2_iv=0.30, dte=7, strategy="CSP", ctx=ctx)
-    assert inside.reject_reason and not outside.reject_reason
+    assert inside.inside_move and not outside.inside_move
+    assert inside.penalty > outside.penalty
+    assert not inside.reject_reason and not outside.reject_reason
 
 
 def test_no_suggestion_that_breaks_the_roll_window():

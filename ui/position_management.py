@@ -225,8 +225,12 @@ def _fetch_roll_candidates(
 
     chain_type = "puts" if pos.strategy == "CSP" else "calls"
     chain = puts if chain_type == "puts" else calls
-    strike_lo = pos.strike * 0.90
-    strike_hi = pos.strike * 1.10
+    # Wider on the safer side (lower puts / higher calls) so the Safe pick
+    # can reach strikes well out of the money.
+    if pos.strategy == "CSP":
+        strike_lo, strike_hi = pos.strike * 0.80, pos.strike * 1.10
+    else:
+        strike_lo, strike_hi = pos.strike * 0.90, pos.strike * 1.20
     buy_to_close = pos.current_ask  # pay the ask to close short
 
     for opt in chain:
@@ -780,6 +784,34 @@ def _render_event_panel(
         )
 
 
+def _render_safe_empty(picks: RollPicks, pos: OpenPosition) -> None:
+    """Say exactly why there is no Safe pick — never guess."""
+    kind = "P" if pos.strategy == "CSP" else "C"
+    side = "below" if pos.strategy == "CSP" else "above"
+    if picks.safe_blocked:
+        lines = [
+            f"{len(picks.safe_blocked)} roll(s) farther out still collect a "
+            f"credit but failed a filter:"
+        ]
+        for c, reason in picks.safe_blocked[:4]:
+            lines.append(
+                f"• ${c.strike:g}{kind} {c.expiration} · "
+                f"+${c.roll_credit:.2f} — {reason}"
+            )
+        st.caption("  \n".join(lines))
+    elif picks.safe_farther_count == 0:
+        st.caption(
+            f"No strikes farther out than Balanced came back in range "
+            f"(up to 20% {side} your strike, Leg 2 and the next two weeks)."
+        )
+    else:
+        st.caption(
+            f"All {picks.safe_farther_count} farther-out rolls are net debits "
+            f"at real fill prices (sell the new leg at the bid, buy back the "
+            f"current one at the ask). At mid prices some may look like a credit."
+        )
+
+
 def _render_event_badge(ev) -> None:
     """Per-card earnings / IV-spike summary."""
     is_earn = ev.kind == "earnings"
@@ -983,11 +1015,7 @@ def _render_roll_alternatives(picks: RollPicks, pos: OpenPosition) -> None:
             if cand is None:
                 st.markdown(f"**{label}**")
                 if bucket == "safe" and picks.balanced is not None:
-                    st.caption(
-                        "No roll farther out of the money than Balanced still "
-                        "collects a credit — this week or the next two. "
-                        "Balanced is already the safest credit roll."
-                    )
+                    _render_safe_empty(picks, pos)
                 else:
                     st.caption("No qualifying candidate.")
                 continue

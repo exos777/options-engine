@@ -126,6 +126,12 @@ class RollPicks:
     # Keyed by (strike, expiration): Safe may come from a later expiration
     # that shares a strike with a Leg 2 candidate.
     scores: dict[tuple[float, str], RollScore] = field(default_factory=dict)
+    # Why Safe may be empty: rolls farther OTM than Balanced that collect a
+    # credit but failed a hard filter (with the reason), how many farther
+    # rolls were looked at, and how many of those are net debits.
+    safe_blocked: list[tuple[RollCandidate, str]] = field(default_factory=list)
+    safe_farther_count: int = 0
+    safe_debit_count: int = 0
 
     def score_for(self, cand: Optional[RollCandidate]) -> Optional[RollScore]:
         if cand is None:
@@ -698,10 +704,10 @@ def pick_top_rolls(
         return RollPicks()
 
     scored: list[tuple[RollCandidate, RollScore]] = []
+    rejected: list[tuple[RollCandidate, RollScore]] = []
     for c in candidates:
         s = score_roll_candidate(c, pos, **kwargs)
-        if not s.rejected:
-            scored.append((c, s))
+        (rejected if s.rejected else scored).append((c, s))
 
     if not scored:
         return RollPicks()
@@ -712,8 +718,7 @@ def pick_top_rolls(
     extra_scored: list[tuple[RollCandidate, RollScore]] = []
     for c in safe_candidates or []:
         s = score_roll_candidate(c, pos, **kwargs)
-        if not s.rejected:
-            extra_scored.append((c, s))
+        (rejected if s.rejected else extra_scored).append((c, s))
 
     # Balanced is the best-scoring Leg 2 roll. Safe is a roll farther OTM
     # that still pays (Leg 2 or a later week). If nothing is farther OTM
@@ -766,6 +771,19 @@ def pick_top_rolls(
     distinct = [c for c, _ in by_credit if c is not balanced and c is not safe]
     premium = distinct[0] if distinct else None
 
+    # Diagnostics for an empty Safe: what lies farther OTM, and why it lost.
+    farther = [
+        (c, s) for c, s in scored + extra_scored + rejected
+        if c is not balanced and _farther_otm(c, balanced, pos.strategy)
+    ]
+    safe_blocked = sorted(
+        (
+            (c, s.rejection_reason) for c, s in farther
+            if s.rejected and c.roll_credit >= MIN_SAFE_CREDIT
+        ),
+        key=lambda pair: -pair[0].roll_credit,
+    )
+
     return RollPicks(
         balanced=balanced,
         safe=safe,
@@ -775,4 +793,7 @@ def pick_top_rolls(
         scores={
             (c.strike, c.expiration): s for c, s in scored + extra_scored
         },
+        safe_blocked=safe_blocked,
+        safe_farther_count=len(farther),
+        safe_debit_count=sum(1 for c, _ in farther if c.roll_credit < MIN_SAFE_CREDIT),
     )

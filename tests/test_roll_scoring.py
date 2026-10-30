@@ -485,3 +485,21 @@ def test_format_recommendation_includes_strike_exp_and_credit():
     assert "2026-05-15" in text
     assert "+$1.85" in text
     assert "best balanced roll" in text
+
+
+# ── empty-Safe diagnostics ──────────────────────
+
+def test_empty_safe_reports_credit_rolls_that_failed_a_filter():
+    """A farther-OTM roll that pays but is illiquid must be named, not
+    reported as 'nothing collects a credit'."""
+    pos = make_csp()
+    best = make_roll(strike=365, roll_credit=0.90, delta=0.20)
+    thin = make_roll(strike=355, roll_credit=0.70, delta=0.12, open_interest=10)
+    debit = make_roll(strike=350, roll_credit=-0.40, delta=0.09)
+    picks = pick_top_rolls([best], pos, underlying_price=370.0,
+                           safe_candidates=[thin, debit])
+    assert picks.safe is None
+    assert picks.safe_farther_count == 2
+    assert picks.safe_debit_count == 1
+    [(cand, reason)] = picks.safe_blocked
+    assert cand is thin and "OI 10" in reason

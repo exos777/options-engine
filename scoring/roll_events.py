@@ -33,6 +33,14 @@ TERM_SPIKE_RATIO = 1.30
 # Score penalty for a roll spanning an event, outside the event move.
 EVENT_PENALTY = 10.0
 
+# Leg 1 IV is only a usable "no event" baseline with this many days left:
+# options a day or two from expiry carry noisy, inflated IV.
+MIN_BASELINE_DTE = 5
+
+# Roll window — a "pick this expiration instead" suggestion must fit it.
+ROLL_MIN_DTE = 7
+ROLL_MAX_DTE = 21
+
 
 @dataclass
 class EventContext:
@@ -71,8 +79,18 @@ class EventContext:
 
     @property
     def base_iv(self) -> float:
-        """IV with no event in it: Leg 1's if it ends first, else realised."""
-        if self.leg1_iv > 0 and not self.earnings_before_leg1:
+        """
+        IV with no event in it: Leg 1's when it ends before the event and
+        still has MIN_BASELINE_DTE days left, else 20-day realised vol.
+        """
+        leg1_dte = (self.leg1_expiration - self.today).days
+        leg1_usable = (
+            self.leg1_iv > 0
+            and not self.earnings_before_leg1
+            and leg1_dte >= MIN_BASELINE_DTE
+        )
+        if leg1_usable or (self.realized_vol <= 0 and self.leg1_iv > 0
+                           and not self.earnings_before_leg1):
             return self.leg1_iv
         return self.realized_vol
 
@@ -93,11 +111,32 @@ def implied_event_move(spot: float, event_iv: float, base_iv: float, dte: int) -
     return spot * math.sqrt(excess)
 
 
+def measure_event_move(
+    ctx: EventContext, leg2_iv: float, dte: int,
+) -> tuple[float, str]:
+    """
+    (±$ move, how it was measured) for a Leg 2 that spans an event:
+
+      "event" — the event's own move, from IV above the baseline
+      "full"  — the event can't be separated (Leg 2 IV isn't above the
+                baseline), so Leg 2's whole expected move, which includes
+                the event, is used instead — the conservative bound
+      "none"  — no IV to measure anything
+    """
+    move = implied_event_move(ctx.spot, leg2_iv, ctx.base_iv, dte)
+    if move > 0:
+        return move, "event"
+    if leg2_iv > 0 and ctx.spot > 0 and dte > 0:
+        return ctx.spot * leg2_iv * math.sqrt(dte / 365.0), "full"
+    return 0.0, "none"
+
+
 @dataclass
 class CandidateEvent:
     """How one Leg 2 candidate relates to the event."""
     kind: Optional[str] = None       # "earnings" | "iv_spike" | None
     event_move: float = 0.0          # ±$ expected on the event (0 = unknown)
+    move_basis: str = "none"         # "event" | "full" | "none" — see measure_event_move
     inside_move: bool = False        # strike within the event move
     adjusted_credit: float = 0.0     # roll credit without event premium
     event_premium: float = 0.0       # per share, on the new leg
@@ -141,7 +180,7 @@ def assess_candidate(
         # Premium scales roughly with IV: strip the event share of the new leg.
         out.event_premium = sell_to_open * (1.0 - base / leg2_iv)
         out.adjusted_credit = credit - out.event_premium
-        out.event_move = implied_event_move(ctx.spot, leg2_iv, base, dte)
+    out.event_move, out.move_basis = measure_event_move(ctx, leg2_iv, dte)
 
     if out.event_move > 0:
         if strategy == "CSP":
@@ -157,23 +196,38 @@ def assess_candidate(
         else:
             out.penalty = EVENT_PENALTY
     elif out.kind == "earnings":
-        # Spans earnings but the move can't be measured: stay strict.
-        out.reject_reason = "Earnings inside DTE window (event move unknown)"
+        # Spans earnings and there's no IV to size any move: stay strict.
+        out.reject_reason = "Earnings inside DTE window (no IV to size the move)"
     else:
         out.penalty = EVENT_PENALTY
     return out
 
 
 def last_expiration_before(
-    expirations: list[str], event: date, after: date,
+    expirations: list[str],
+    event: date,
+    after: date,
+    today: Optional[date] = None,
+    min_dte: int = ROLL_MIN_DTE,
+    max_dte: int = ROLL_MAX_DTE,
 ) -> Optional[str]:
-    """Latest expiration after *after* that still ends before *event*."""
+    """
+    Latest expiration after *after* that ends before *event* AND is a
+    valid roll target (min_dte–max_dte days out). None if there isn't one —
+    then every roll spans the event.
+    """
+    today = today or date.today()
     best: Optional[str] = None
     for exp in expirations:
         try:
             d = date.fromisoformat(exp)
         except (TypeError, ValueError):
             continue
-        if after < d < event and (best is None or d > date.fromisoformat(best)):
+        dte = (d - today).days
+        if (
+            after < d < event
+            and min_dte <= dte <= max_dte
+            and (best is None or d > date.fromisoformat(best))
+        ):
             best = exp
     return best

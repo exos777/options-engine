@@ -14,6 +14,7 @@ from scoring.roll_events import (
     assess_candidate,
     implied_event_move,
     last_expiration_before,
+    measure_event_move,
 )
 from scoring.roll_scoring import score_roll_candidate
 
@@ -96,7 +97,7 @@ def test_call_side_uses_the_upper_move():
 def test_unmeasurable_earnings_stay_strict():
     ctx = _ctx(date(2026, 11, 10), leg1_iv=0.0, rv=0.0)
     ev = _assess(85, 0.0, ctx)
-    assert "event move unknown" in ev.reject_reason
+    assert "no IV to size the move" in ev.reject_reason
 
 
 def test_iv_term_spike_without_a_date_is_treated_as_an_event():
@@ -109,8 +110,8 @@ def test_iv_term_spike_without_a_date_is_treated_as_an_event():
 
 def test_last_expiration_before_the_report():
     exps = ["2026-10-30", "2026-11-06", "2026-11-13", "2026-11-20"]
-    assert last_expiration_before(exps, date(2026, 11, 18), after=LEG1) == "2026-11-13"
-    assert last_expiration_before(exps, date(2026, 11, 10), after=LEG1) is None
+    assert last_expiration_before(exps, date(2026, 11, 18), after=LEG1, today=TODAY) == "2026-11-13"
+    assert last_expiration_before(exps, date(2026, 11, 10), after=LEG1, today=TODAY) is None
 
 
 # ── wired into the roll scorer ──────────────────
@@ -146,3 +147,50 @@ def test_scorer_rejects_inside_move_and_penalizes_outside():
 def test_scorer_without_context_keeps_the_legacy_earnings_rule():
     s = score_roll_candidate(_cand(88, 3.0, 0.60), POS, has_earnings=True)
     assert s.rejected and "Earnings" in s.rejection_reason
+
+
+# ── the reported case: Leg 1 expiring tomorrow, earnings Tue Nov 03 ──
+
+NEAR_LEG1 = date(2026, 10, 31)
+NOV6 = date(2026, 11, 6)
+
+
+def _near_ctx(leg1_iv=0.80, rv=0.35, earnings=date(2026, 11, 3)):
+    return EventContext(
+        today=TODAY, leg1_expiration=NEAR_LEG1, leg2_expiration=NOV6, spot=100.0,
+        leg1_iv=leg1_iv, realized_vol=rv, earnings_date=earnings,
+    )
+
+
+def test_a_leg1_about_to_expire_is_not_the_baseline():
+    """1-DTE IV is noisy and inflated — use realised vol instead."""
+    assert _near_ctx().base_iv == 0.35
+    assert _ctx(date(2026, 11, 10)).base_iv == 0.30      # 7 DTE Leg 1 still used
+
+
+def test_reported_case_measures_the_move_instead_of_rejecting_everything():
+    ctx = _near_ctx()
+    move, basis = measure_event_move(ctx, 0.55, 7)
+    assert basis == "event"
+    assert move == pytest.approx(implied_event_move(100, 0.55, 0.35, 7))
+    far = assess_candidate(strike=90, sell_to_open=1.2, buy_to_close=1.0,
+                           leg2_iv=0.55, dte=7, strategy="CSP", ctx=ctx)
+    assert not far.reject_reason and far.penalty == EVENT_PENALTY
+
+
+def test_inseparable_event_falls_back_to_the_whole_expected_move():
+    ctx = _near_ctx(rv=0.40)                              # Leg 2 IV below baseline
+    move, basis = measure_event_move(ctx, 0.30, 7)
+    assert basis == "full"
+    assert move == pytest.approx(100 * 0.30 * math.sqrt(7 / 365))
+    inside = assess_candidate(strike=97, sell_to_open=1.0, buy_to_close=0.8,
+                              leg2_iv=0.30, dte=7, strategy="CSP", ctx=ctx)
+    outside = assess_candidate(strike=94, sell_to_open=0.6, buy_to_close=0.4,
+                               leg2_iv=0.30, dte=7, strategy="CSP", ctx=ctx)
+    assert inside.reject_reason and not outside.reject_reason
+
+
+def test_no_suggestion_that_breaks_the_roll_window():
+    """Nov 02 ends before the report but is only 3 days out — not a valid roll."""
+    exps = ["2026-10-30", "2026-11-02", "2026-11-04", "2026-11-06"]
+    assert last_expiration_before(exps, date(2026, 11, 3), after=NEAR_LEG1, today=TODAY) is None

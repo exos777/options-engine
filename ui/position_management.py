@@ -33,8 +33,8 @@ from scoring.position_decision import (
 )
 from scoring.roll_events import (
     EventContext,
-    implied_event_move,
     last_expiration_before,
+    measure_event_move,
 )
 from scoring.roll_scoring import (
     RollPicks,
@@ -694,19 +694,38 @@ def _render_event_panel(
     """Explain how earnings / an IV-implied event shape this roll."""
     if ctx is None:
         return
-    # Measure the event on the candidate nearest the money.
+    # Measure the event on the candidate nearest the money — the same way
+    # the scorer measures each candidate, so the text matches the result.
     near = min(candidates, key=lambda c: abs(c.strike - ctx.spot), default=None)
     leg2_iv = near.iv if near is not None else 0.0
     base = ctx.base_iv
-    move = (
-        implied_event_move(ctx.spot, leg2_iv, base, near.dte)
-        if near is not None else 0.0
-    )
-    move_txt = (
-        f" The options price about **±${move:.2f} (±{move / ctx.spot:.1%})** "
-        f"for it." if move > 0 and ctx.spot > 0 else ""
+    move, basis = (
+        measure_event_move(ctx, leg2_iv, near.dte) if near is not None
+        else (0.0, "none")
     )
     side = "below" if strategy == "CSP" else "above"
+    edge = "spot − move" if strategy == "CSP" else "spot + move"
+    pct = f"±{move / ctx.spot:.1%}" if ctx.spot > 0 else ""
+    if basis == "event":
+        rule = (
+            f" The options price about **±${move:.2f} ({pct})** for the report. "
+            f"Strikes inside that move are rejected; the rest must sit {side} "
+            f"it ({edge}) and are ranked on their credit *without* the "
+            f"earnings premium."
+        )
+    elif basis == "full":
+        rule = (
+            f" Leg 2's IV ({leg2_iv:.0%}) isn't above the no-event baseline "
+            f"({base:.0%}), so the earnings move can't be separated out. To "
+            f"stay safe, strikes must sit {side} Leg 2's **whole expected move "
+            f"of ±${move:.2f} ({pct})**, which includes the report; strikes "
+            f"inside it are rejected."
+        )
+    else:
+        rule = (
+            " There's no IV data to size the move, so rolls that span the "
+            "report are rejected."
+        )
     ed = ctx.earnings_date
 
     if ctx.earnings_before_leg1 and ed is not None:
@@ -716,33 +735,34 @@ def _render_event_panel(
             f"for the earnings premium in Leg 1 — if the strike isn't under "
             f"pressure, waiting until after the report usually makes the "
             f"buy-back cheaper (IV crush). Rolling now keeps you exposed to "
-            f"the report on Leg 2 anyway.{move_txt}",
+            f"the report on Leg 2 anyway.{rule}",
         )
     elif ctx.earnings_before_leg2:
         when = f"{ed:%a %b %d}" if ed is not None else "before Leg 2 expires"
-        avoid = (
-            last_expiration_before(expirations, ed, ctx.leg1_expiration)
-            if ed is not None else None
-        )
-        avoid_txt = (
-            f" To stay clear of the report, pick Leg 2 = **{avoid}**."
-            if avoid else ""
-        )
+        if ed is not None:
+            avoid = last_expiration_before(
+                expirations, ed, ctx.leg1_expiration, today=ctx.today,
+            )
+            avoid_txt = (
+                f" To stay clear of the report, pick Leg 2 = **{avoid}**."
+                if avoid else
+                " No roll expiration in the 7–21 day window ends before the "
+                "report, so every roll here holds through earnings."
+            )
+        else:
+            avoid_txt = ""
         st.warning(
-            f"📅 **Earnings {when} falls inside the new expiration "
-            f"({ctx.leg2_expiration:%b %d}).** Leg 2's credit includes "
-            f"earnings premium, which pays for gap risk rather than decay.{move_txt} "
-            f"Strikes inside that move are rejected; the rest are ranked on "
-            f"their credit *without* the earnings premium and must sit "
-            f"{side} the move.{avoid_txt}",
+            f"📅 **Earnings {when} falls before the new expiration "
+            f"({ctx.leg2_expiration:%a %b %d}), so this roll holds through "
+            f"the report.** Leg 2's credit includes earnings premium, which "
+            f"pays for gap risk rather than decay.{rule}{avoid_txt}",
         )
     elif near is not None and ctx.term_spike(leg2_iv):
         st.info(
             f"⚡ **Leg 2 is priced at {leg2_iv:.0%} IV vs a {base:.0%} baseline** "
             f"— the market expects an event before {ctx.leg2_expiration:%b %d} "
             f"(earnings, product news, a Fed day…). It is treated like "
-            f"earnings: strikes inside the event move are rejected and credits "
-            f"are compared without the event premium.{move_txt}",
+            f"earnings.{rule}",
             icon="⚡",
         )
 

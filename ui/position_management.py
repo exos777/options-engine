@@ -31,6 +31,11 @@ from scoring.position_decision import (
     roll_vs_assign_verdict,
     verdict_confidence,
 )
+from scoring.roll_events import (
+    EventContext,
+    implied_event_move,
+    last_expiration_before,
+)
 from scoring.roll_scoring import (
     RollPicks,
     RollScore,
@@ -182,6 +187,15 @@ def _fetch_chart_context(
     except Exception:
         supports, resistances = [], []
 
+    # 20-day realised vol: the "no event" baseline for roll event checks.
+    try:
+        close = df["Close"].astype(float)
+        rets = (close / close.shift(1)).apply(math.log).dropna().tail(20)
+        rv = float(rets.std() * math.sqrt(252))
+        st.session_state[f"pm_rv_{cache_key}"] = rv if math.isfinite(rv) else 0.0
+    except Exception:
+        st.session_state[f"pm_rv_{cache_key}"] = 0.0
+
     result = (indicators, supports, resistances)
     cache[cache_key] = result
     st.session_state["pm_chart_cache"] = cache
@@ -249,8 +263,24 @@ def _fetch_roll_candidates(
             spread_pct=spread_pct,
             buy_to_close=buy_to_close,
             sell_to_open=sell_to_open,
+            iv=opt.implied_volatility or 0.0,
         ))
     return candidates
+
+
+def _lookup_earnings(dp, ticker: str, quote) -> str | None:
+    """Next earnings date (ISO) — the provider's lookup, else the quote's."""
+    found = None
+    if hasattr(dp, "get_earnings_date"):
+        try:
+            found = dp.get_earnings_date(ticker)
+        except Exception:
+            found = None
+    if not found:
+        quoted = getattr(quote, "earnings_date", None)
+        if quoted and str(quoted)[:10] >= date.today().isoformat():
+            found = str(quoted)[:10]
+    return found
 
 
 def _do_fetch(dp, ticker: str, expiration: str, strike: float, strategy: str) -> None:
@@ -266,15 +296,7 @@ def _do_fetch(dp, ticker: str, expiration: str, strike: float, strategy: str) ->
         # Write to the widget key directly so the field reflects live price.
         st.session_state["pm_price"] = quote.price
 
-        if quote.earnings_date:
-            try:
-                ed = date.fromisoformat(quote.earnings_date)
-                exp = date.fromisoformat(expiration)
-                st.session_state["pm_auto_earnings"] = ed <= exp
-            except Exception:
-                st.session_state["pm_auto_earnings"] = False
-        else:
-            st.session_state["pm_auto_earnings"] = False
+        st.session_state["pm_earnings_date"] = _lookup_earnings(dp, ticker, quote)
 
         selected = get_selected_contract(dp, ticker, expiration, strike, strategy)
         st.session_state["pm_auto_dte"] = selected.dte
@@ -511,12 +533,18 @@ def render_position_manager(dp=None) -> None:
                 key="pm_keep_shares",
             )
 
-        has_earnings_default = st.session_state.get("pm_auto_earnings", False)
-        has_earnings = st.checkbox(
-            "Earnings within DTE window",
-            value=has_earnings_default,
-            key="pm_earnings",
-        )
+        earnings_iso = st.session_state.get("pm_earnings_date")
+        earnings_dt = date.fromisoformat(earnings_iso) if earnings_iso else None
+        if earnings_dt is not None:
+            st.caption(f"📅 Next earnings: **{earnings_dt:%a %b %d, %Y}** (auto-detected)")
+            manual_earnings = False
+        else:
+            manual_earnings = st.checkbox(
+                "Earnings before Leg 2 expires",
+                key="pm_earnings",
+                help="No earnings date was found automatically. Tick this if "
+                     "you know the company reports before the new expiration.",
+            )
 
     # ── Evaluate ───────────────────────────────────────
     if st.button(
@@ -558,6 +586,14 @@ def render_position_manager(dp=None) -> None:
                 trade_bias="caution",
             )
 
+        event_ctx = _build_event_context(
+            ticker, expiration, leg2_expiration, current_price,
+            implied_vol, earnings_dt, manual_earnings,
+        )
+        has_earnings = event_ctx is not None and (
+            event_ctx.earnings_before_leg1 or event_ctx.earnings_before_leg2
+        )
+
         # Expected move from Leg 2 IV * sqrt(Leg 2 DTE / 365) * spot
         if implied_vol > 0 and dte_remaining > 0 and current_price > 0:
             expected_move = (
@@ -589,9 +625,101 @@ def render_position_manager(dp=None) -> None:
             resistance_levels=resistances,
             expected_move=expected_move,
             has_earnings=has_earnings,
+            event_ctx=event_ctx,
+            expirations=exp_list,
         )
 
     _save_pm_prefs()
+
+
+def _build_event_context(
+    ticker: str,
+    leg1_exp: str,
+    leg2_exp: str,
+    spot: float,
+    leg1_iv: float,
+    earnings_dt: date | None,
+    manual_earnings: bool,
+) -> EventContext | None:
+    """Everything the roll scorer needs to price events around this roll."""
+    try:
+        leg1 = date.fromisoformat(leg1_exp)
+        leg2 = date.fromisoformat(leg2_exp)
+    except (TypeError, ValueError):
+        return None
+    rv = float(st.session_state.get(f"pm_rv_{ticker}_{date.today().isoformat()}", 0.0))
+    return EventContext(
+        today=date.today(),
+        leg1_expiration=leg1,
+        leg2_expiration=leg2,
+        spot=spot,
+        leg1_iv=leg1_iv,
+        realized_vol=rv,
+        earnings_date=earnings_dt,
+        earnings_flagged=manual_earnings,
+    )
+
+
+def _render_event_panel(
+    ctx: EventContext | None,
+    candidates: list[RollCandidate],
+    expirations: list[str],
+    strategy: str,
+) -> None:
+    """Explain how earnings / an IV-implied event shape this roll."""
+    if ctx is None:
+        return
+    # Measure the event on the candidate nearest the money.
+    near = min(candidates, key=lambda c: abs(c.strike - ctx.spot), default=None)
+    leg2_iv = near.iv if near is not None else 0.0
+    base = ctx.base_iv
+    move = (
+        implied_event_move(ctx.spot, leg2_iv, base, near.dte)
+        if near is not None else 0.0
+    )
+    move_txt = (
+        f" The options price about **±${move:.2f} (±{move / ctx.spot:.1%})** "
+        f"for it." if move > 0 and ctx.spot > 0 else ""
+    )
+    side = "below" if strategy == "CSP" else "above"
+    ed = ctx.earnings_date
+
+    if ctx.earnings_before_leg1 and ed is not None:
+        st.warning(
+            f"📅 **Earnings {ed:%a %b %d} lands before your current option "
+            f"expires ({ctx.leg1_expiration:%b %d}).** Buying it back now pays "
+            f"for the earnings premium in Leg 1 — if the strike isn't under "
+            f"pressure, waiting until after the report usually makes the "
+            f"buy-back cheaper (IV crush). Rolling now keeps you exposed to "
+            f"the report on Leg 2 anyway.{move_txt}",
+        )
+    elif ctx.earnings_before_leg2:
+        when = f"{ed:%a %b %d}" if ed is not None else "before Leg 2 expires"
+        avoid = (
+            last_expiration_before(expirations, ed, ctx.leg1_expiration)
+            if ed is not None else None
+        )
+        avoid_txt = (
+            f" To stay clear of the report, pick Leg 2 = **{avoid}**."
+            if avoid else ""
+        )
+        st.warning(
+            f"📅 **Earnings {when} falls inside the new expiration "
+            f"({ctx.leg2_expiration:%b %d}).** Leg 2's credit includes "
+            f"earnings premium, which pays for gap risk rather than decay.{move_txt} "
+            f"Strikes inside that move are rejected; the rest are ranked on "
+            f"their credit *without* the earnings premium and must sit "
+            f"{side} the move.{avoid_txt}",
+        )
+    elif near is not None and ctx.term_spike(leg2_iv):
+        st.info(
+            f"⚡ **Leg 2 is priced at {leg2_iv:.0%} IV vs a {base:.0%} baseline** "
+            f"— the market expects an event before {ctx.leg2_expiration:%b %d} "
+            f"(earnings, product news, a Fed day…). It is treated like "
+            f"earnings: strikes inside the event move are rejected and credits "
+            f"are compared without the event premium.{move_txt}",
+            icon="⚡",
+        )
 
 
 def _conf_color(level: str) -> str:
@@ -616,7 +744,12 @@ def _render_decision(
     resistance_levels: list[SupportResistanceLevel] | None = None,
     expected_move: float = 0.0,
     has_earnings: bool = False,
+    event_ctx: EventContext | None = None,
+    expirations: list[str] | None = None,
 ) -> None:
+    _render_event_panel(
+        event_ctx, decision.roll_candidates, expirations or [], pos.strategy,
+    )
     picks = pick_top_rolls(
         decision.roll_candidates,
         pos,
@@ -626,6 +759,7 @@ def _render_decision(
         expected_move=expected_move,
         underlying_price=current_price,
         has_earnings=has_earnings,
+        event_ctx=event_ctx,
     )
     best_roll = picks.balanced
     verdict = roll_vs_assign_verdict(pos, best_roll)
@@ -800,6 +934,16 @@ def _render_roll_alternatives(picks: RollPicks, pos: OpenPosition) -> None:
                 f"{credit_sign}${abs(cand.roll_credit):.2f}",
                 f"STO ${cand.sell_to_open:.2f} · BTC ${cand.buy_to_close:.2f}",
             )
+            ev = score.event if score else None
+            if ev is not None and ev.spans_event:
+                icon = "📅" if ev.kind == "earnings" else "⚡"
+                st.caption(
+                    f"{icon} Spans {'earnings' if ev.kind == 'earnings' else 'an event'}"
+                    + (f" · outside ±${ev.event_move:.2f} move" if ev.event_move else "")
+                    + (f" · ${ev.event_premium:.2f} event premium → "
+                       f"{'+' if ev.adjusted_credit >= 0 else '−'}${abs(ev.adjusted_credit):.2f} "
+                       f"without it" if ev.event_premium else "")
+                )
             if pos.strategy == "CSP":
                 st.metric(
                     "New Effective Cost",

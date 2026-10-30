@@ -74,6 +74,7 @@ class RollCandidate:
     spread_pct: float = 0.0
     buy_to_close: float = 0.0   # price paid to close the current short (current ask)
     sell_to_open: float = 0.0   # price received to open the new short (new bid)
+    iv: float = 0.0             # new leg's implied vol (0 = unknown)
 
 
 @dataclass

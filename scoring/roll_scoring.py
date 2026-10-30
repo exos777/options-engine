@@ -9,7 +9,8 @@ Hard filters reject candidates outright:
   - poor liquidity (OI < min)
   - wide spreads (>15%)
   - DTE outside 7–21
-  - earnings inside DTE window
+  - a strike inside the expected earnings/event move when Leg 2 spans
+    the event (or earnings with no measurable move) — see roll_events
   - net debit without sufficient strike improvement
   - CC strike below cost basis
 
@@ -21,6 +22,10 @@ Delta is then applied as a soft penalty (subtracted from the composite),
 so it shapes the score without being a primary driver. The highest
 premium does NOT automatically win Balanced.
 
+When Leg 2 spans an event (earnings, or an IV term-structure spike), the
+premium sub-score uses the event-adjusted credit — event premium pays for
+gap risk, it isn't decay income — and the composite takes a penalty.
+
 Indicator inputs are optional. When omitted the corresponding signal
 defaults to neutral and the structure sub-score defaults to 50.
 """
@@ -30,6 +35,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Literal, Optional
 
+from scoring.roll_events import CandidateEvent, EventContext, assess_candidate
 from scoring.position_decision import (
     OpenPosition,
     RollCandidate,
@@ -97,6 +103,7 @@ class RollScore:
     explanation: str = ""
     delta_penalty: float = 0.0
     signals: Optional[Signals] = None
+    event: Optional[CandidateEvent] = None
 
 
 @dataclass
@@ -369,6 +376,7 @@ def score_roll_candidate(
     expected_move: float = 0.0,
     underlying_price: float = 0.0,
     has_earnings: bool = False,
+    event_ctx: Optional[EventContext] = None,
     min_open_interest: int = DEFAULT_MIN_OPEN_INTEREST,
 ) -> RollScore:
     """Score a single roll candidate. Hard filters short-circuit with rejected=True."""
@@ -392,7 +400,24 @@ def score_roll_candidate(
             score=0.0, rejected=True,
             rejection_reason=f"DTE {candidate.dte} outside 7–21 window",
         )
-    if has_earnings:
+    event: Optional[CandidateEvent] = None
+    if event_ctx is not None:
+        event = assess_candidate(
+            strike=candidate.strike,
+            sell_to_open=candidate.sell_to_open or candidate.bid,
+            buy_to_close=candidate.buy_to_close,
+            leg2_iv=candidate.iv,
+            dte=candidate.dte,
+            strategy=pos.strategy,
+            ctx=event_ctx,
+        )
+        if event.reject_reason:
+            return RollScore(
+                score=0.0, rejected=True,
+                rejection_reason=event.reject_reason, event=event,
+            )
+    elif has_earnings:
+        # No event context to measure the move with: stay strict.
         return RollScore(
             score=0.0, rejected=True,
             rejection_reason="Earnings inside DTE window",
@@ -450,7 +475,11 @@ def score_roll_candidate(
 
     # ── Sub-scores ──────────────────────────────────────────────────
     sub = {
-        "premium":       _premium_score(candidate.roll_credit),
+        "premium":       _premium_score(
+            event.adjusted_credit
+            if event is not None and event.spans_event
+            else candidate.roll_credit
+        ),
         "theta":         _theta_score(candidate),
         "distance":      _distance_score(candidate, underlying_price),
         "liquidity":     _liquidity_score(
@@ -470,8 +499,12 @@ def score_roll_candidate(
     # Soft delta penalty applied to the composite, not to a sub-score weight.
     delta_pen = _delta_penalty(delta_abs)
     composite = _clamp(composite - delta_pen)
+    if event is not None:
+        composite = _clamp(composite - event.penalty)
 
     explanation = _build_explanation(candidate, pos, sub, signals, delta_pen)
+    if event is not None and event.spans_event:
+        explanation += ", " + _event_phrase(event, event_ctx)
 
     return RollScore(
         score=round(composite, 2),
@@ -481,7 +514,24 @@ def score_roll_candidate(
         explanation=explanation,
         delta_penalty=round(delta_pen, 2),
         signals=signals,
+        event=event,
     )
+
+
+def _event_phrase(event: CandidateEvent, ctx: EventContext) -> str:
+    """e.g. 'spans earnings Nov 06 — strike outside the ±$18.20 move, $1.10 of the credit is event premium'."""
+    what = (
+        f"earnings {ctx.earnings_date:%b %d}"
+        if event.kind == "earnings" and ctx.earnings_date
+        else "earnings" if event.kind == "earnings"
+        else "an IV spike (likely event)"
+    )
+    parts = [f"spans {what}"]
+    if event.event_move > 0:
+        parts.append(f"strike outside the ±${event.event_move:.2f} move")
+    if event.event_premium > 0:
+        parts.append(f"${event.event_premium:.2f} of the credit is event premium")
+    return " — ".join(parts[:1]) + (" (" + ", ".join(parts[1:]) + ")" if parts[1:] else "")
 
 
 # ---------------------------------------------------------------------------

@@ -120,21 +120,33 @@ CC:
 
 ## Roll Events (Manage Position)
 
-Rolls are priced with events in mind (`scoring/roll_events.py`):
+Rolls are priced with events in mind (`scoring/roll_events.py`). By the
+trader's choice, events NEVER remove a roll — the app always shows the
+three picks (Safe / Balanced / Premium) and explains the event instead.
+(Overrides "Earnings inside DTE window → NO TRADE" for rolls only.)
 
 - Earnings date is auto-detected (Tradier → yfinance) and checked
-  against BOTH legs. Earnings before Leg 1 expires: buying back now pays
-  event premium — prefer waiting for the IV crush unless tested.
+  against each candidate's expiration. Earnings before Leg 1 expires:
+  buying back now pays event premium — prefer waiting for the IV crush
+  unless tested.
+- Baseline "normal IV": Leg 1's IV if it ends before the event with ≥ 5
+  days left, else 20-day realised vol × 1.2 (normal IV-over-RV premium).
 - An event with no known date is detected from the term structure: Leg 2
-  IV ≥ 1.3× the no-event baseline (Leg 1 IV if Leg 1 ends first, else
-  20-day realised vol).
-- Event move = spot × √((IV₂² − base²) × DTE₂/365).
-- Leg 2 strike INSIDE the event move → rejected (the report likely tests
-  it). Outside → allowed with a −10 penalty, and the premium sub-score
-  uses the credit with the event premium stripped out.
-- Earnings with no measurable move (no IV data) → rejected, per the hard
-  filter "Earnings inside DTE window".
-- The panel names the last expiration before the report to avoid it.
+  IV ≥ 1.3× the baseline.
+- Every card and the panel report how much the event raised IV
+  (e.g. "IV 62% vs 35% normal: +27 pts (+77%)"), the expected event move,
+  whether the strike is inside it, and how much of the credit is event
+  premium.
+- Event move = spot × √((IV₂² − base²) × DTE₂/365); if the event can't be
+  separated from normal vol, Leg 2's whole expected move is used.
+- Scoring: spanning an event −10; strike inside the move −25; the premium
+  sub-score uses the credit with the event premium stripped out.
+- Picks are always distinct: Balanced = best score; Safe = farther OTM
+  that still pays (Leg 2 or the next two weeks); if none, the top roll
+  becomes Safe and the next best Balanced; Premium = most credit of the
+  rest.
+- The panel names the last valid (7–21 DTE) expiration before the report,
+  or says every roll spans it.
 
 ## Daily Scanner — Same-Day CSP Mode
 

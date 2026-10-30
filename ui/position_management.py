@@ -225,8 +225,12 @@ def _fetch_roll_candidates(
 
     chain_type = "puts" if pos.strategy == "CSP" else "calls"
     chain = puts if chain_type == "puts" else calls
-    strike_lo = pos.strike * 0.90
-    strike_hi = pos.strike * 1.10
+    # Wider on the safer side (lower puts / higher calls) so the Safe pick
+    # can reach strikes well out of the money.
+    if pos.strategy == "CSP":
+        strike_lo, strike_hi = pos.strike * 0.80, pos.strike * 1.10
+    else:
+        strike_lo, strike_hi = pos.strike * 0.90, pos.strike * 1.20
     buy_to_close = pos.current_ask  # pay the ask to close short
 
     for opt in chain:
@@ -706,26 +710,39 @@ def _render_event_panel(
     side = "below" if strategy == "CSP" else "above"
     edge = "spot − move" if strategy == "CSP" else "spot + move"
     pct = f"±{move / ctx.spot:.1%}" if ctx.spot > 0 else ""
+    if leg2_iv > base > 0:
+        iv_line = (
+            f" **IV: {leg2_iv:.0%} on Leg 2 vs {base:.0%} normal → "
+            f"+{(leg2_iv - base) * 100:.0f} pts (+{(leg2_iv - base) / base:.0%}) "
+            f"from the event.**"
+        )
+    elif leg2_iv > 0 and base > 0:
+        iv_line = (
+            f" IV: {leg2_iv:.0%} on Leg 2 vs {base:.0%} normal — no measurable "
+            f"bump from the event yet."
+        )
+    else:
+        iv_line = ""
     if basis == "event":
         rule = (
             f" The options price about **±${move:.2f} ({pct})** for the report. "
-            f"Strikes inside that move are rejected; the rest must sit {side} "
-            f"it ({edge}) and are ranked on their credit *without* the "
-            f"earnings premium."
+            f"All rolls are still shown: strikes {side} that move ({edge}) rank "
+            f"higher; strikes inside it rank lower because the report may test "
+            f"them. Credits are compared *without* the earnings premium."
         )
     elif basis == "full":
         rule = (
-            f" Leg 2's IV ({leg2_iv:.0%}) isn't above the no-event baseline "
-            f"({base:.0%}), so the earnings move can't be separated out. To "
-            f"stay safe, strikes must sit {side} Leg 2's **whole expected move "
-            f"of ±${move:.2f} ({pct})**, which includes the report; strikes "
-            f"inside it are rejected."
+            f" The earnings bump can't be separated from normal volatility, so "
+            f"Leg 2's **whole expected move of ±${move:.2f} ({pct})**, which "
+            f"includes the report, is used: strikes {side} it rank higher, "
+            f"strikes inside it rank lower. All rolls are still shown."
         )
     else:
         rule = (
-            " There's no IV data to size the move, so rolls that span the "
-            "report are rejected."
+            " There's no IV data to size the move, so rolls through the report "
+            "are flagged and ranked a little lower. All rolls are still shown."
         )
+    rule = iv_line + rule
     ed = ctx.earnings_date
 
     if ctx.earnings_before_leg1 and ed is not None:
@@ -765,6 +782,58 @@ def _render_event_panel(
             f"earnings.{rule}",
             icon="⚡",
         )
+
+
+def _render_safe_empty(picks: RollPicks, pos: OpenPosition) -> None:
+    """Say exactly why there is no Safe pick — never guess."""
+    kind = "P" if pos.strategy == "CSP" else "C"
+    side = "below" if pos.strategy == "CSP" else "above"
+    if picks.safe_blocked:
+        lines = [
+            f"{len(picks.safe_blocked)} roll(s) farther out still collect a "
+            f"credit but failed a filter:"
+        ]
+        for c, reason in picks.safe_blocked[:4]:
+            lines.append(
+                f"• ${c.strike:g}{kind} {c.expiration} · "
+                f"+${c.roll_credit:.2f} — {reason}"
+            )
+        st.caption("  \n".join(lines))
+    elif picks.safe_farther_count == 0:
+        st.caption(
+            f"No strikes farther out than Balanced came back in range "
+            f"(up to 20% {side} your strike, Leg 2 and the next two weeks)."
+        )
+    else:
+        st.caption(
+            f"All {picks.safe_farther_count} farther-out rolls are net debits "
+            f"at real fill prices (sell the new leg at the bid, buy back the "
+            f"current one at the ask). At mid prices some may look like a credit."
+        )
+
+
+def _render_event_badge(ev) -> None:
+    """Per-card earnings / IV-spike summary."""
+    is_earn = ev.kind == "earnings"
+    icon, name = ("📅", "earnings") if is_earn else ("⚡", "IV spike")
+    lines = [f"{icon} **Holds through {name}**"]
+    if ev.iv_increase_pts > 0:
+        lines.append(
+            f"IV {ev.leg2_iv:.0%} vs {ev.base_iv:.0%} normal: "
+            f"**+{ev.iv_increase_pts * 100:.0f} pts (+{ev.iv_increase_pct:.0%})**"
+        )
+    if ev.event_move > 0:
+        lines.append(
+            ("⚠️ strike **inside**" if ev.inside_move else "✅ strike outside")
+            + f" the ±${ev.event_move:.2f} move"
+        )
+    if ev.event_premium > 0:
+        sign = "+" if ev.adjusted_credit >= 0 else "−"
+        lines.append(
+            f"${ev.event_premium:.2f} of the credit is {name} premium "
+            f"({sign}${abs(ev.adjusted_credit):.2f} without it)"
+        )
+    st.caption("  \n".join(lines))
 
 
 def _conf_color(level: str) -> str:
@@ -946,11 +1015,7 @@ def _render_roll_alternatives(picks: RollPicks, pos: OpenPosition) -> None:
             if cand is None:
                 st.markdown(f"**{label}**")
                 if bucket == "safe" and picks.balanced is not None:
-                    st.caption(
-                        "No roll farther out of the money than Balanced still "
-                        "collects a credit — this week or the next two. "
-                        "Balanced is already the safest credit roll."
-                    )
+                    _render_safe_empty(picks, pos)
                 else:
                     st.caption("No qualifying candidate.")
                 continue
@@ -996,14 +1061,7 @@ def _render_roll_alternatives(picks: RollPicks, pos: OpenPosition) -> None:
             )
             ev = score.event if score else None
             if ev is not None and ev.spans_event:
-                icon = "📅" if ev.kind == "earnings" else "⚡"
-                st.caption(
-                    f"{icon} Spans {'earnings' if ev.kind == 'earnings' else 'an event'}"
-                    + (f" · outside ±${ev.event_move:.2f} move" if ev.event_move else "")
-                    + (f" · ${ev.event_premium:.2f} event premium → "
-                       f"{'+' if ev.adjusted_credit >= 0 else '−'}${abs(ev.adjusted_credit):.2f} "
-                       f"without it" if ev.event_premium else "")
-                )
+                _render_event_badge(ev)
             if pos.strategy == "CSP":
                 st.metric(
                     "New Effective Cost",

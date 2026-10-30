@@ -9,8 +9,10 @@ Hard filters reject candidates outright:
   - poor liquidity (OI < min)
   - wide spreads (>15%)
   - DTE outside 7–21
-  - a strike inside the expected earnings/event move when Leg 2 spans
-    the event (or earnings with no measurable move) — see roll_events
+
+Earnings / IV events never reject a roll (see roll_events): they lower
+the score — more when the strike sits inside the expected event move —
+and every candidate reports how much the event raised IV.
   - net debit without sufficient strike improvement
   - CC strike below cost basis
 
@@ -36,7 +38,12 @@ from dataclasses import dataclass, field
 from datetime import date
 from typing import Literal, Optional
 
-from scoring.roll_events import CandidateEvent, EventContext, assess_candidate
+from scoring.roll_events import (
+    EVENT_PENALTY,
+    CandidateEvent,
+    EventContext,
+    assess_candidate,
+)
 from scoring.position_decision import (
     OpenPosition,
     RollCandidate,
@@ -119,6 +126,12 @@ class RollPicks:
     # Keyed by (strike, expiration): Safe may come from a later expiration
     # that shares a strike with a Leg 2 candidate.
     scores: dict[tuple[float, str], RollScore] = field(default_factory=dict)
+    # Why Safe may be empty: rolls farther OTM than Balanced that collect a
+    # credit but failed a hard filter (with the reason), how many farther
+    # rolls were looked at, and how many of those are net debits.
+    safe_blocked: list[tuple[RollCandidate, str]] = field(default_factory=list)
+    safe_farther_count: int = 0
+    safe_debit_count: int = 0
 
     def score_for(self, cand: Optional[RollCandidate]) -> Optional[RollScore]:
         if cand is None:
@@ -428,10 +441,12 @@ def score_roll_candidate(
                 rejection_reason=event.reject_reason, event=event,
             )
     elif has_earnings:
-        # No event context to measure the move with: stay strict.
-        return RollScore(
-            score=0.0, rejected=True,
-            rejection_reason="Earnings inside DTE window",
+        # Earnings flagged but no context to measure them: never reject
+        # (the trader wants all three picks) — rank lower and say why.
+        event = CandidateEvent(
+            kind="earnings",
+            adjusted_credit=candidate.roll_credit,
+            penalty=EVENT_PENALTY,
         )
     if delta_abs >= DELTA_HARD_CAP:
         return RollScore(
@@ -536,20 +551,34 @@ def _parse_exp(value: str) -> Optional[date]:
         return None
 
 
-def _event_phrase(event: CandidateEvent, ctx: EventContext) -> str:
-    """e.g. 'spans earnings Nov 06 — strike outside the ±$18.20 move, $1.10 of the credit is event premium'."""
-    what = (
-        f"earnings {ctx.earnings_date:%b %d}"
-        if event.kind == "earnings" and ctx.earnings_date
-        else "earnings" if event.kind == "earnings"
-        else "an IV spike (likely event)"
-    )
-    parts = [f"spans {what}"]
+def _event_phrase(event: CandidateEvent, ctx: Optional[EventContext]) -> str:
+    """
+    e.g. 'spans earnings Nov 03 (IV +27 pts / +77% from it, strike INSIDE
+    the ±$18.20 move, $1.10 of the credit is earnings premium)'.
+    """
+    is_earn = event.kind == "earnings"
+    if is_earn and ctx is not None and ctx.earnings_date:
+        what = f"earnings {ctx.earnings_date:%b %d}"
+    elif is_earn:
+        what = "earnings"
+    else:
+        what = "an IV spike (likely event)"
+    src = "earnings" if is_earn else "the event"
+    parts: list[str] = []
+    if event.iv_increase_pts > 0:
+        parts.append(
+            f"IV +{event.iv_increase_pts * 100:.0f} pts / "
+            f"+{event.iv_increase_pct:.0%} from {src}"
+        )
     if event.event_move > 0:
-        parts.append(f"strike outside the ±${event.event_move:.2f} move")
+        where = "INSIDE" if event.inside_move else "outside"
+        parts.append(f"strike {where} the ±${event.event_move:.2f} move")
     if event.event_premium > 0:
-        parts.append(f"${event.event_premium:.2f} of the credit is event premium")
-    return " — ".join(parts[:1]) + (" (" + ", ".join(parts[1:]) + ")" if parts[1:] else "")
+        parts.append(
+            f"${event.event_premium:.2f} of the credit is "
+            f"{'earnings' if is_earn else 'event'} premium"
+        )
+    return f"spans {what}" + (f" ({', '.join(parts)})" if parts else "")
 
 
 # ---------------------------------------------------------------------------
@@ -656,16 +685,18 @@ def pick_top_rolls(
       balanced — highest composite score overall (highest premium does
                  NOT auto-win — it has to clear the weighted blend with
                  acceptable delta penalty).
-      safe     — genuinely safer than Balanced: a strike strictly farther
-                 OTM that still collects a net credit (≥ MIN_SAFE_CREDIT);
-                 the best-scoring one with |delta| <= SAFE_DELTA_MAX, else
-                 the lowest |delta|. It may come from *safe_candidates*
+      safe     — a roll farther OTM than Balanced that still collects a
+                 net credit (≥ MIN_SAFE_CREDIT), from Leg 2 or a later
+                 week: best score with |delta| <= SAFE_DELTA_MAX, else the
+                 lowest |delta|. If none exists and two or more other rolls
+                 do, the top roll becomes Safe and the next best Balanced —
+                 three distinct picks whenever three rolls qualify. It may come from *safe_candidates*
                  — later expirations, since going further out in time is
                  how a farther-OTM roll still pays a credit. None when
                  no safer roll collects a credit; Safe never repeats
                  Balanced.
-      premium  — highest net credit among non-ITM scored candidates.
-                 Forced distinct from balanced when an alternative exists.
+      premium  — highest net credit among non-ITM scored candidates,
+                 distinct from Balanced and Safe.
                  All hard filters (incl. |delta| < 0.35) still apply, so
                  this is "higher credit but still acceptable."
     """
@@ -673,10 +704,10 @@ def pick_top_rolls(
         return RollPicks()
 
     scored: list[tuple[RollCandidate, RollScore]] = []
+    rejected: list[tuple[RollCandidate, RollScore]] = []
     for c in candidates:
         s = score_roll_candidate(c, pos, **kwargs)
-        if not s.rejected:
-            scored.append((c, s))
+        (rejected if s.rejected else scored).append((c, s))
 
     if not scored:
         return RollPicks()
@@ -684,30 +715,41 @@ def pick_top_rolls(
     by_score = sorted(scored, key=lambda pair: pair[1].score, reverse=True)
     score_by_strike = {c.strike: s for c, s in by_score}
 
-    balanced = by_score[0][0]
-
     extra_scored: list[tuple[RollCandidate, RollScore]] = []
     for c in safe_candidates or []:
         s = score_roll_candidate(c, pos, **kwargs)
-        if not s.rejected:
-            extra_scored.append((c, s))
+        (rejected if s.rejected else extra_scored).append((c, s))
 
-    safe_pool = [
+    # Balanced is the best-scoring Leg 2 roll. Safe is a roll farther OTM
+    # that still pays (Leg 2 or a later week). If nothing is farther OTM
+    # but two or more other rolls exist, the top roll is already the most
+    # conservative: it becomes Safe and the next best becomes Balanced,
+    # so three distinct picks show whenever three rolls qualify —
+    # earnings never remove one.
+    balanced = by_score[0][0]
+
+    def _safest(pool):
+        low = [(c, s) for c, s in pool if abs(c.delta) <= SAFE_DELTA_MAX]
+        if low:
+            return max(low, key=lambda pair: (pair[1].score, pair[0].roll_credit))[0]
+        if pool:
+            return min(pool, key=lambda pair: (abs(pair[0].delta), -pair[0].roll_credit))[0]
+        return None
+
+    safe = _safest([
         (c, s) for c, s in scored + extra_scored
         if c is not balanced
         and _farther_otm(c, balanced, pos.strategy)
         and c.roll_credit >= MIN_SAFE_CREDIT
-    ]
-    # Within the low-delta zone, the best composite wins — it weighs credit,
-    # so Safe still pays real premium rather than the most remote strike
-    # for pennies. Only if nothing is that low, take the lowest delta.
-    low_delta = [(c, s) for c, s in safe_pool if abs(c.delta) <= SAFE_DELTA_MAX]
-    if low_delta:
-        safe = max(low_delta, key=lambda pair: (pair[1].score, pair[0].roll_credit))[0]
-    elif safe_pool:
-        safe = min(safe_pool, key=lambda pair: (abs(pair[0].delta), -pair[0].roll_credit))[0]
-    else:
-        safe = None
+    ])
+    if safe is None and len(by_score) >= 3 and balanced.roll_credit >= MIN_SAFE_CREDIT:
+        safe = balanced
+        balanced = next(
+            c for c, _ in by_score
+            if c is not safe and _farther_otm(safe, c, pos.strategy)
+        ) if any(
+            c is not safe and _farther_otm(safe, c, pos.strategy) for c, _ in by_score
+        ) else next(c for c, _ in by_score if c is not safe)
 
     underlying_price = float(kwargs.get("underlying_price", 0.0) or 0.0)
     if underlying_price > 0:
@@ -726,10 +768,21 @@ def pick_top_rolls(
         ),
         reverse=True,
     )
-    premium = by_credit[0][0]
+    distinct = [c for c, _ in by_credit if c is not balanced and c is not safe]
+    premium = distinct[0] if distinct else None
 
-    if premium is balanced and len(by_credit) > 1:
-        premium = by_credit[1][0]
+    # Diagnostics for an empty Safe: what lies farther OTM, and why it lost.
+    farther = [
+        (c, s) for c, s in scored + extra_scored + rejected
+        if c is not balanced and _farther_otm(c, balanced, pos.strategy)
+    ]
+    safe_blocked = sorted(
+        (
+            (c, s.rejection_reason) for c, s in farther
+            if s.rejected and c.roll_credit >= MIN_SAFE_CREDIT
+        ),
+        key=lambda pair: -pair[0].roll_credit,
+    )
 
     return RollPicks(
         balanced=balanced,
@@ -740,4 +793,7 @@ def pick_top_rolls(
         scores={
             (c.strike, c.expiration): s for c, s in scored + extra_scored
         },
+        safe_blocked=safe_blocked,
+        safe_farther_count=len(farther),
+        safe_debit_count=sum(1 for c, _ in farther if c.roll_credit < MIN_SAFE_CREDIT),
     )

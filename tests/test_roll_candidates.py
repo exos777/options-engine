@@ -28,3 +28,19 @@ def test_roll_credit_is_sell_to_open_bid_minus_buy_to_close_ask():
     assert cands[450].sell_to_open == 11.00
     assert round(cands[450].roll_credit, 2) == 0.90
     assert round(cands[440].roll_credit, 2) == -4.10       # a debit, not a credit
+
+
+class _WideDP:
+    def get_option_chain(self, ticker, exp):
+        put = lambda k: OptionContract(
+            strike=k, expiration=exp, option_type="put", bid=1.0, ask=1.1,
+            last=1.0, volume=100, open_interest=500, delta=-0.10,
+        )
+        return [], [put(k) for k in (360, 380, 400, 470, 520)]
+
+
+def test_csp_search_reaches_20pct_below_the_strike():
+    pos = OpenPosition(strategy="CSP", strike=460, original_premium=4.50,
+                       current_bid=0.9, current_ask=1.0)
+    strikes = {c.strike for c in _fetch_roll_candidates(_WideDP(), "MSFT", pos, LEG2)}
+    assert strikes == {380, 400, 470}      # 368–506: 360 and 520 out of range

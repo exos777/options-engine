@@ -12,6 +12,10 @@ Two consequences for a roll:
   * The stock is expected to jump by the event move. A Leg 2 strike
     inside that move is likely to be tested by the event itself.
 
+Events never reject a roll: the trader wants three recommendations even
+through earnings. They lower the score (more inside the move) and every
+candidate carries how much the event raised IV and what it's worth.
+
 The event move is measured from the IV term structure: the variance
 Leg 2 carries beyond a "no event" baseline (Leg 1's IV when Leg 1 ends
 before the event, else realised volatility) is attributed to the event.
@@ -30,12 +34,20 @@ from typing import Optional
 # earnings date is known.
 TERM_SPIKE_RATIO = 1.30
 
-# Score penalty for a roll spanning an event, outside the event move.
-EVENT_PENALTY = 10.0
+# Score penalties for a roll spanning an event. Events never REJECT a
+# roll — the trader wants all three picks and to judge the risk — they
+# rank it lower and the cards say why.
+EVENT_PENALTY = 10.0          # spans the event, strike outside its move
+INSIDE_MOVE_PENALTY = 25.0    # strike inside the move: the report may test it
 
 # Leg 1 IV is only a usable "no event" baseline with this many days left:
 # options a day or two from expiry carry noisy, inflated IV.
 MIN_BASELINE_DTE = 5
+
+# Implied vol normally runs above realised vol even with no event (the
+# variance risk premium). When realised vol is the baseline, scale it so
+# "normal IV" isn't understated — otherwise ordinary IV reads as a spike.
+RV_TO_IV = 1.20
 
 # Roll window — a "pick this expiration instead" suggestion must fit it.
 ROLL_MIN_DTE = 7
@@ -81,7 +93,8 @@ class EventContext:
     def base_iv(self) -> float:
         """
         IV with no event in it: Leg 1's when it ends before the event and
-        still has MIN_BASELINE_DTE days left, else 20-day realised vol.
+        still has MIN_BASELINE_DTE days left, else 20-day realised vol
+        scaled by RV_TO_IV.
         """
         leg1_dte = (self.leg1_expiration - self.today).days
         leg1_usable = (
@@ -92,7 +105,7 @@ class EventContext:
         if leg1_usable or (self.realized_vol <= 0 and self.leg1_iv > 0
                            and not self.earnings_before_leg1):
             return self.leg1_iv
-        return self.realized_vol
+        return self.realized_vol * RV_TO_IV
 
     def term_spike(self, leg2_iv: float) -> bool:
         """Leg 2 priced well above the baseline — an unnamed event."""
@@ -140,12 +153,28 @@ class CandidateEvent:
     inside_move: bool = False        # strike within the event move
     adjusted_credit: float = 0.0     # roll credit without event premium
     event_premium: float = 0.0       # per share, on the new leg
+    leg2_iv: float = 0.0             # the candidate's IV
+    base_iv: float = 0.0             # no-event baseline it is compared to
     penalty: float = 0.0
-    reject_reason: str = ""
+    reject_reason: str = ""          # kept for callers; events never set it
 
     @property
     def spans_event(self) -> bool:
         return self.kind is not None
+
+    @property
+    def iv_increase_pts(self) -> float:
+        """IV points added by the event (e.g. 0.27 = +27 pts). 0 if unknown."""
+        if self.leg2_iv <= 0 or self.base_iv <= 0:
+            return 0.0
+        return max(self.leg2_iv - self.base_iv, 0.0)
+
+    @property
+    def iv_increase_pct(self) -> float:
+        """Relative IV increase (e.g. 0.77 = 77% higher than normal)."""
+        if self.base_iv <= 0:
+            return 0.0
+        return self.iv_increase_pts / self.base_iv
 
 
 def assess_candidate(
@@ -176,6 +205,7 @@ def assess_candidate(
         return out
 
     base = ctx.base_iv
+    out.leg2_iv, out.base_iv = leg2_iv, base
     if leg2_iv > 0 and base > 0 and leg2_iv > base:
         # Premium scales roughly with IV: strip the event share of the new leg.
         out.event_premium = sell_to_open * (1.0 - base / leg2_iv)
@@ -187,17 +217,7 @@ def assess_candidate(
             out.inside_move = strike > ctx.spot - out.event_move
         else:
             out.inside_move = strike < ctx.spot + out.event_move
-        if out.inside_move:
-            what = "earnings" if out.kind == "earnings" else "event"
-            out.reject_reason = (
-                f"Inside the ±${out.event_move:.2f} {what} move — "
-                f"likely tested by the {what}"
-            )
-        else:
-            out.penalty = EVENT_PENALTY
-    elif out.kind == "earnings":
-        # Spans earnings and there's no IV to size any move: stay strict.
-        out.reject_reason = "Earnings inside DTE window (no IV to size the move)"
+        out.penalty = INSIDE_MOVE_PENALTY if out.inside_move else EVENT_PENALTY
     else:
         out.penalty = EVENT_PENALTY
     return out

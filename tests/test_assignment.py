@@ -287,3 +287,46 @@ def test_last_weeks_low_includes_the_latest_completed_session(bullish_df):
     full = calculate_full_indicators(df)                    # dates end 2024-12-31
     low = next(lv for lv in _indicator_levels(full) if lv.name == "last week's low")
     assert low.price == 50.0
+
+
+# ── auto limit: best premium for the risk ───────
+
+from scoring.assignment import (  # noqa: E402
+    ASSIGNMENT_AVERSION,
+    AUTO_MAX_LIMIT,
+    AUTO_MIN_LIMIT,
+    eligible_picks,
+    expected_shortfall,
+    recommend_limit,
+)
+
+
+def test_expected_shortfall_matches_black_scholes_with_no_drift():
+    from scipy.stats import norm
+    import math
+    S, K, T, v = 100.0, 95.0, 7 / 365, 0.40
+    d1 = (math.log(S / K) + 0.5 * v * v * T) / (v * math.sqrt(T)); d2 = d1 - v * math.sqrt(T)
+    bs_put = K * norm.cdf(-d2) - S * norm.cdf(-d1)
+    assert expected_shortfall(S, K, T, v, 0.0, "put") == pytest.approx(bs_put)
+    assert expected_shortfall(S, 105, T, v, 0.3, "call") > expected_shortfall(S, 105, T, v, 0.0, "call")
+
+
+def test_edge_is_premium_minus_loss_averse_assignment_cost():
+    est = AssignmentEstimate(prob=0.1, market_prob=0.1, delta=0.1, shortfall=0.20)
+    pick = SafePick(contract=_opt(95), side="CSP", credit=0.60, yield_pct=0.6 / 95, estimate=est)
+    assert pick.edge == pytest.approx(0.60 - (1 + ASSIGNMENT_AVERSION) * 0.20)
+
+
+def test_recommend_limit_lands_between_10_and_30_percent():
+    calm = TechnicalView(realized_vol=0.20, atr=1.5)            # stock moves less than IV
+    puts = eligible_picks(_ladder(), "CSP", SPOT, WEEK, calm, max_prob=AUTO_MAX_LIMIT)
+    auto = recommend_limit(puts)
+    assert AUTO_MIN_LIMIT <= auto.limit <= AUTO_MAX_LIMIT
+    assert auto.best is not None and auto.best.edge > 0
+    assert auto.best.estimate.prob <= auto.limit
+    assert auto.best is max(puts, key=lambda p: (p.edge_pct, p.credit))
+    assert "best premium for its risk" in auto.reason
+
+
+def test_recommend_limit_defaults_to_10_when_nothing_qualifies():
+    assert recommend_limit([], []).limit == AUTO_MIN_LIMIT

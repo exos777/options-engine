@@ -330,3 +330,43 @@ def test_recommend_limit_lands_between_10_and_30_percent():
 
 def test_recommend_limit_defaults_to_10_when_nothing_qualifies():
     assert recommend_limit([], []).limit == AUTO_MIN_LIMIT
+
+
+# ── target price ────────────────────────────────
+
+from scoring.assignment import predict_target  # noqa: E402
+
+
+def test_neutral_chart_targets_about_todays_price():
+    t = predict_target(TechnicalView(), 100.0, 5, 0.40)
+    assert t.price == pytest.approx(100.0, abs=0.3)
+    assert t.low < 100 < t.high
+    assert t.stop_level is None
+
+
+def test_chart_drift_moves_the_target_and_the_range():
+    up = predict_target(TechnicalView(drift=0.4, parts=[("uptrend", 0.4)]), 100.0, 5, 0.40)
+    down = predict_target(TechnicalView(drift=-0.4, parts=[("downtrend", -0.4)]), 100.0, 5, 0.40)
+    assert down.price < 100 < up.price
+    assert up.high > down.high and up.low > down.low
+
+
+def test_a_level_between_price_and_target_stops_it():
+    view = TechnicalView(drift=0.4, parts=[("uptrend", 0.4)],
+                         levels=[Level(100.2, "SMA20", 0.45, "both")])
+    t = predict_target(view, 100.0, 5, 0.40)
+    assert t.raw > 100.2
+    assert t.price == 100.2 and t.stop_level == "SMA20 $100.20"
+
+
+def test_target_range_matches_68_percent_bounds():
+    import math
+    t = predict_target(TechnicalView(), 100.0, 7, 0.40)
+    yrs = 7 / 365
+    c = -0.5 * 0.40 ** 2 * yrs
+    assert t.low == pytest.approx(100 * math.exp(c - 0.40 * math.sqrt(yrs)))
+    assert t.high == pytest.approx(100 * math.exp(c + 0.40 * math.sqrt(yrs)))
+
+
+def test_no_volatility_no_target():
+    assert predict_target(TechnicalView(), 100.0, 5, 0.0) is None

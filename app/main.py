@@ -194,8 +194,6 @@ with st.sidebar:
             st.session_state.pop("_tradier_probe_key", None)
             st.rerun()
 
-    run_button = st.button("🔍 Run Screener", type="primary", use_container_width=True)
-
     st.divider()
 
     # --- Ticker history ---
@@ -235,18 +233,20 @@ with st.sidebar:
         help="Enter a US stock ticker (e.g. TSLA, MSFT, NVDA)",
     ).upper().strip()
 
-    strategy_choice = st.radio(
-        "Strategy",
-        options=[s.value for s in Strategy],
-        index=0,
-        horizontal=True,
-    )
-    strategy = Strategy(strategy_choice)
+    run_button = st.button("🔍 Run Screener", type="primary", use_container_width=True)
 
-    # Covered calls use the ledger's premium-adjusted basis as the cost-basis
-    # hard filter when this ticker's shares are held.
+    # The Max Premium panel screens covered calls AND puts. The single-side
+    # sections below it follow the wheel phase: covered calls when the
+    # Ledger holds 100+ shares of this ticker, cash-secured puts otherwise.
+    # Covered calls also use the Ledger's premium-adjusted basis as the
+    # cost-basis hard filter.
     _ledger_pos = ledger_ui.position_for(ticker_input)
     _ledger_has_shares = _ledger_pos is not None and _ledger_pos.shares > 0
+    strategy = (
+        Strategy.COVERED_CALL
+        if _ledger_has_shares and _ledger_pos.shares >= 100
+        else Strategy.CASH_SECURED_PUT
+    )
     if _ledger_has_shares:
         st.caption(
             f"📒 Ledger: {_ledger_pos.shares:,} {ticker_input} shares · "
@@ -600,6 +600,12 @@ with tab_screener:
 
         # C. Recommendations
         st.divider()
+        st.caption(
+            "Showing **covered calls** — the Ledger holds your shares."
+            if strategy == Strategy.COVERED_CALL else
+            "Showing **cash-secured puts** — no shares of this ticker in the "
+            "Ledger. Both sides are compared in 🎯 Max Premium above."
+        )
         rec_ui.render_recommendations(result, strategy, expected_move=expected_move)
         if strategy == Strategy.CASH_SECURED_PUT and result.recommendations:
             _render_csp_capacity(result)

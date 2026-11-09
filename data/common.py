@@ -5,10 +5,13 @@ Shared data utilities used by data providers (yfinance, Tradier).
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import date, datetime, time, timedelta
+from zoneinfo import ZoneInfo
 from typing import Optional
 
 import pandas as pd
+
+_MARKET_TZ = ZoneInfo("America/New_York")
 
 from strategies.models import OptionContract, Quote
 
@@ -194,24 +197,35 @@ def earnings_warning(quote: Quote, expiration: str) -> Optional[str]:
     return None
 
 
-def pick_wheel_expiration(
-    expirations: list[str], today: Optional[date] = None,
+def pick_weekly_expiration(
+    expirations: list[str], now: Optional[datetime] = None,
 ) -> Optional[str]:
     """
-    The expiration the wheel trades: the earliest 7–14 DTE (preferred
-    window), else the earliest 5–21 DTE (hard-filter window). None if
-    nothing fits — the caller falls back to the nearest weekly.
+    This week's Friday close, counted from when the scan runs (New York
+    time): Monday → that Friday; Friday before 4:00 pm ET → today (0 DTE);
+    Friday after the close or the weekend → next Friday.
+
+    In a holiday week the weekly expires early (e.g. Thursday before Good
+    Friday), so the last expiration on or before that Friday is used.
+    None if no expiration falls within the coming week.
     """
-    today = today or date.today()
+    now = (now or datetime.now(_MARKET_TZ)).astimezone(_MARKET_TZ)
+    today = now.date()
+    after_close = now.time() >= time(16, 0)
+    # The coming Friday (today if Friday and the market is still open).
+    days_to_friday = (4 - today.weekday()) % 7
+    if days_to_friday == 0 and after_close:
+        days_to_friday = 7
+    friday = today + timedelta(days=days_to_friday)
 
-    def dte(exp: str) -> Optional[int]:
+    valid: list[date] = []
+    for exp in expirations:
         try:
-            return (date.fromisoformat(exp) - today).days
+            d = date.fromisoformat(exp)
         except (TypeError, ValueError):
-            return None
-
-    for lo, hi in ((7, 14), (5, 21)):
-        fits = sorted(e for e in expirations if (d := dte(e)) is not None and lo <= d <= hi)
-        if fits:
-            return fits[0]
-    return None
+            continue
+        if d < today or (d == today and after_close):
+            continue
+        if d <= friday:
+            valid.append(d)
+    return max(valid).isoformat() if valid else None

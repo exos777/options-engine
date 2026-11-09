@@ -45,7 +45,7 @@ for _mod_name in list(sys.modules):
 import streamlit as st
 
 from data import provider as _yf_provider
-from data.common import pick_wheel_expiration
+from data.common import pick_weekly_expiration
 from data.tradier_provider import (
     tradier_available,
     tradier_status,
@@ -436,7 +436,7 @@ if ticker_input and (
     with st.spinner(f"Loading expirations for {ticker_input}…"):
         try:
             exps = cached_expirations(ticker_input)
-            default = pick_wheel_expiration(list(exps)) or dp.get_nearest_weekly_expiration(ticker_input)
+            default = pick_weekly_expiration(list(exps)) or dp.get_nearest_weekly_expiration(ticker_input)
             st.session_state["expirations"] = list(exps)
             st.session_state["default_exp"] = default
             st.session_state["last_ticker"] = ticker_input
@@ -557,8 +557,8 @@ with tab_screener:
         st.divider()
         st.subheader(f"Market Overview — {result.quote.ticker}")
         st.caption(
-            f"🗓️ Expiration {result.expiration} · {result.dte} DTE — picked "
-            f"automatically: the earliest 7–14 DTE (wheel window), else 5–21."
+            f"🗓️ Expiration {result.expiration} · {result.dte} DTE — this "
+            f"week's Friday close, counted from today."
         )
         rec_ui.render_market_overview(result, strategy, full_ind)
 

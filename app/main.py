@@ -60,6 +60,7 @@ from strategies.models import FilterParams, RiskProfile, Strategy
 from ui.chart import build_price_chart
 from portfolio.exposure import compute_exposure, max_new_csp_contracts
 from ui import ledger as ledger_ui
+from ui.assignment_view import render_assignment_panel
 from ui import recommendations as rec_ui
 from ui.position_management import render_position_manager
 from ui.scanner import render_scanner
@@ -491,6 +492,16 @@ def cached_chain(ticker: str, expiration: str):
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
+def cached_earnings(ticker: str):
+    if not hasattr(dp, "get_earnings_date"):
+        return None
+    try:
+        return dp.get_earnings_date(ticker)
+    except Exception:
+        return None
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
 def cached_history(ticker: str):
     return dp.get_historical(ticker, months=6)
 
@@ -735,6 +746,23 @@ with tab_screener:
 
         # A2. Price Forecast (2-zone bias bar)
         rec_ui.render_price_forecast(result, strategy, full_ind)
+
+        # A3. CC vs CSP — most premium under an assignment-probability limit
+        st.divider()
+        try:
+            _calls, _puts = cached_chain(result.quote.ticker, result.expiration)
+        except Exception:
+            _calls, _puts = [], []
+        render_assignment_panel(
+            result, full_ind, _calls, _puts,
+            min_open_interest=filter_params.min_open_interest,
+            desired_buy_price=filter_params.desired_buy_price,
+            cost_basis=filter_params.cost_basis,
+            earnings_date=(
+                result.quote.earnings_date
+                or cached_earnings(result.quote.ticker)
+            ),
+        )
 
         # B. Technical Chart
         st.divider()

@@ -101,3 +101,15 @@ def test_dte_uses_leg2_expiration():
     assert leg2 is not None
     # The DTE the UI will display equals (Leg 2 - today).days
     assert days_to_expiration(leg2) == 10  # 3 + 7
+
+
+# ── pick_wheel_expiration ───────────────────────
+
+def test_pick_wheel_expiration_prefers_7_to_14_then_5_to_21():
+    from datetime import date, timedelta
+    from data.common import pick_wheel_expiration
+    t = date(2026, 11, 9)
+    d = lambda n: (t + timedelta(days=n)).isoformat()
+    assert pick_wheel_expiration([d(2), d(5), d(9), d(12)], today=t) == d(9)
+    assert pick_wheel_expiration([d(2), d(5), d(16)], today=t) == d(5)
+    assert pick_wheel_expiration([d(1), d(30)], today=t) is None

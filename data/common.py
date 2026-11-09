@@ -192,3 +192,26 @@ def earnings_warning(quote: Quote, expiration: str) -> Optional[str]:
     except Exception:
         pass
     return None
+
+
+def pick_wheel_expiration(
+    expirations: list[str], today: Optional[date] = None,
+) -> Optional[str]:
+    """
+    The expiration the wheel trades: the earliest 7–14 DTE (preferred
+    window), else the earliest 5–21 DTE (hard-filter window). None if
+    nothing fits — the caller falls back to the nearest weekly.
+    """
+    today = today or date.today()
+
+    def dte(exp: str) -> Optional[int]:
+        try:
+            return (date.fromisoformat(exp) - today).days
+        except (TypeError, ValueError):
+            return None
+
+    for lo, hi in ((7, 14), (5, 21)):
+        fits = sorted(e for e in expirations if (d := dte(e)) is not None and lo <= d <= hi)
+        if fits:
+            return fits[0]
+    return None

@@ -45,6 +45,7 @@ for _mod_name in list(sys.modules):
 import streamlit as st
 
 from data import provider as _yf_provider
+from data.common import pick_wheel_expiration
 from data.tradier_provider import (
     tradier_available,
     tradier_status,
@@ -167,21 +168,12 @@ div[data-testid="column"] > div > div > div > button:focus {
 with st.sidebar:
     st.header("⚙️ Settings")
 
-    # Data source selector
-    _tradier_ok = tradier_available()
-    _source_options = [
-        "Auto (Tradier → yfinance fallback)",
-        "Tradier Only",
-        "Yahoo Finance Only",
-    ]
-    _default_source = st.session_state.get("data_source", _source_options[0])
-    _idx = _source_options.index(_default_source) if _default_source in _source_options else 0
-    data_source = st.sidebar.radio("Data Source", options=_source_options, index=_idx)
-
+    # Data comes from Tradier, falling back to Yahoo Finance automatically.
     # Validate the token against the live API rather than merely checking
     # that one is set — a stale key otherwise shows a false "connected"
     # badge and then 401s on the first real request. Cached per-token so
     # this costs one call per key, not one per rerun.
+    os.environ.pop("OPTIONS_FORCE_YFINANCE", None)
     _tok_fingerprint = _tradier_token_fingerprint()
     if st.session_state.get("_tradier_probe_key") != _tok_fingerprint:
         st.session_state["_tradier_probe_key"] = _tok_fingerprint
@@ -191,20 +183,16 @@ with st.sidebar:
     )
 
     if _tradier_live:
-        st.success(f"📡 {_tradier_msg}", icon="✅")
-    elif data_source in (_source_options[0], _source_options[1]):
+        st.success("📡 Tradier connected", icon="✅")
+    else:
         st.warning(
-            f"{_tradier_msg} Falling back to Yahoo Finance.",
+            f"Tradier not connected — using Yahoo Finance (15-min delayed). "
+            f"{_tradier_msg}",
             icon="⚠️",
         )
         if st.button("↻ Re-check Tradier", use_container_width=True):
             st.session_state.pop("_tradier_probe_key", None)
             st.rerun()
-
-    if data_source != st.session_state.get("data_source"):
-        st.session_state["data_source"] = data_source
-        st.cache_data.clear()
-        st.rerun()
 
     run_button = st.button("🔍 Run Screener", type="primary", use_container_width=True)
 
@@ -255,8 +243,8 @@ with st.sidebar:
     )
     strategy = Strategy(strategy_choice)
 
-    # Shares, basis and premium come from the ledger when this ticker has
-    # an open wheel cycle, so the CC cost-basis hard filter uses real numbers.
+    # Covered calls use the ledger's premium-adjusted basis as the cost-basis
+    # hard filter when this ticker's shares are held.
     _ledger_pos = ledger_ui.position_for(ticker_input)
     _ledger_has_shares = _ledger_pos is not None and _ledger_pos.shares > 0
     if _ledger_has_shares:
@@ -265,211 +253,38 @@ with st.sidebar:
             f"adjusted basis ${_ledger_pos.adjusted_basis:,.2f}"
         )
 
-    st.divider()
-    st.subheader("Wheel Phase")
-
-    wheel_phase = st.radio(
-        "Current Phase",
-        options=[
-            "\U0001f4c9 CSP Phase \u2014 Entering Position",
-            "\U0001f4c8 CC Phase \u2014 Assigned, Reducing Basis",
-        ],
-        index=0 if strategy == Strategy.CASH_SECURED_PUT else 1,
-        help="CSP = selling puts to enter\nCC = assigned, selling calls to exit",
-    )
-
-    assignment_price_val: float = 0.0
-    total_premium_collected: float = 0.0
-
-    if "CC Phase" in wheel_phase:
-        assignment_price_val = st.number_input(
-            "Assignment Price ($)",
-            min_value=0.0,
-            value=(
-                round(_ledger_pos.avg_share_cost, 2) if _ledger_has_shares else 0.0
-            ),
-            step=0.01,
-            help="Price you were assigned at",
-        )
-        total_premium_collected = st.number_input(
-            "Total Premium Collected ($)",
-            min_value=0.0,
-            value=(
-                round(max(_ledger_pos.net_premium, 0.0) / _ledger_pos.shares, 2)
-                if _ledger_has_shares else 0.0
-            ),
-            step=0.01,
-            help="All premium collected so far in this wheel, per share",
-        )
-        if assignment_price_val > 0:
-            effective_basis = assignment_price_val - total_premium_collected
-            st.metric(
-                "Effective Cost Basis",
-                f"${effective_basis:.2f}",
-                delta=f"-${total_premium_collected:.2f} from premium",
-            )
-
-    st.divider()
-    st.subheader("Expiration")
-
-    # We fetch expirations after the run button; store in session state
-    expiration_options: list[str] = st.session_state.get("expirations", [])
-    default_exp: str = st.session_state.get("default_exp", "")
-
-    if expiration_options:
-        exp_index = (
-            expiration_options.index(default_exp)
-            if default_exp in expiration_options
-            else 0
-        )
-        selected_expiration = st.selectbox(
-            "Expiration Date",
-            options=expiration_options,
-            index=exp_index,
-            key="expiration_select",
-        )
-    else:
-        selected_expiration = ""
-        st.info("Run screener to load expirations.")
-
-    st.divider()
-    st.subheader("Position Details")
-
-    if strategy == Strategy.COVERED_CALL:
-        shares_owned = st.number_input(
-            "Shares Owned", min_value=0,
-            value=_ledger_pos.shares if _ledger_has_shares else 100,
-            step=100,
-        )
-        cost_basis = st.number_input(
-            "Cost Basis per Share ($)",
-            min_value=0.0,
-            value=(
-                round(max(_ledger_pos.adjusted_basis, 0.0), 2)
-                if _ledger_has_shares else 0.0
-            ),
-            step=0.01,
-            help="Leave 0 to ignore cost basis filtering. Pre-filled with "
-                 "the ledger's premium-adjusted basis when available.",
-        )
-        cost_basis_val = cost_basis if cost_basis > 0 else None
-        allow_below_basis = st.checkbox(
-            "Allow strikes below cost basis",
-            value=False,
-            help="If unchecked, strikes below break-even are filtered out",
-        )
-        cash_available = None
-        desired_buy_price = None
-    else:
-        cash_available = st.number_input(
-            "Cash Available ($)",
-            min_value=0.0,
-            value=10000.0,
-            step=500.0,
-        )
-        desired_buy_price_input = st.number_input(
-            "Desired Buy Price ($)",
-            min_value=0.0,
-            value=0.0,
-            step=0.01,
-            help="Leave 0 to ignore buy price preference",
-        )
-        desired_buy_price = desired_buy_price_input if desired_buy_price_input > 0 else None
-        shares_owned = 0
-        cost_basis_val = None
-        allow_below_basis = False
-
-    st.divider()
-    st.subheader("Risk Profile")
-
-    risk_choice = st.select_slider(
-        "Risk Tolerance",
-        options=[r.value for r in RiskProfile],
-        value=RiskProfile.BALANCED.value,
-    )
-    risk_profile = RiskProfile(risk_choice)
-
-    st.divider()
-    st.subheader("Filters")
-
-    max_delta = st.slider(
-        "Max Delta",
-        min_value=0.05,
-        max_value=0.60,
-        value={"Conservative": 0.30, "Balanced": 0.40, "Aggressive": 0.50}[risk_choice],
-        step=0.05,
-        help="Maximum absolute delta to consider",
-    )
-    min_oi = st.number_input(
-        "Min Open Interest",
-        min_value=0,
-        value=50,
-        step=10,
-    )
-    max_spread_pct = st.slider(
-        "Max Bid-Ask Spread %",
-        min_value=5,
-        max_value=80,
-        value=30,
-        step=5,
-        help="Maximum bid-ask spread as % of mid price",
-    )
-    min_premium = st.number_input(
-        "Min Premium ($)",
-        min_value=0.0,
-        value=0.10,
-        step=0.05,
-    )
-
-
 
 # ---------------------------------------------------------------------------
-# Resolve data provider based on sidebar selection
+# Data provider: Tradier-first with automatic yfinance fallback
 # ---------------------------------------------------------------------------
-# Yahoo-only mode flips a process-wide kill-switch that data/provider.py
-# checks before delegating to Tradier; everything else uses the Tradier-first
-# wrappers in data/provider.py transparently.
-if data_source == "Yahoo Finance Only":
-    os.environ["OPTIONS_FORCE_YFINANCE"] = "1"
-else:
-    os.environ.pop("OPTIONS_FORCE_YFINANCE", None)
+# data.provider tries Tradier and falls back to yfinance per call; gate the
+# "live" label on the *validated* token status, not merely "a token is set".
+_use_tradier = _tradier_live
+dp = _yf_provider
+_source_label = "📡 Tradier (Live)" if _use_tradier else "📊 yfinance (Delayed)"
 
-# Gate on the *validated* status, not merely "a token is set". A stale or
-# malformed key would otherwise pass and then 401 on the first request —
-# in "Tradier Only" mode that surfaced as an uncaught traceback.
-_use_tradier = (
-    _tradier_live
-    and data_source in ("Auto (Tradier → yfinance fallback)", "Tradier Only")
+# ---------------------------------------------------------------------------
+# Build FilterParams — standard wheel defaults (the sidebar no longer has
+# risk / filter controls). Cost basis comes from the ledger when held.
+# ---------------------------------------------------------------------------
+
+_ledger_basis = (
+    round(max(_ledger_pos.adjusted_basis, 0.0), 2) if _ledger_has_shares else None
 )
-if _use_tradier and data_source == "Tradier Only":
-    # Strict: skip the yfinance fallback entirely.
-    from data import tradier_provider as dp
-    _source_label = "📡 Tradier (Live)"
-elif _use_tradier:
-    # Auto: data.provider transparently does Tradier-first / yfinance-fallback.
-    dp = _yf_provider
-    _source_label = "📡 Tradier (Live)"
-else:
-    dp = _yf_provider
-    _source_label = "📊 yfinance (Delayed)"
-
-# ---------------------------------------------------------------------------
-# Build FilterParams from sidebar inputs
-# ---------------------------------------------------------------------------
-
 filter_params = FilterParams(
     strategy=strategy,
-    risk_profile=risk_profile,
-    max_delta=max_delta,
-    min_open_interest=min_oi,
-    max_spread_pct=max_spread_pct / 100,
-    min_premium=min_premium,
-    shares_owned=shares_owned,
-    cost_basis=cost_basis_val,
-    allow_below_basis=allow_below_basis,
-    cash_available=cash_available,
-    desired_buy_price=desired_buy_price,
+    risk_profile=RiskProfile.BALANCED,
+    max_delta=0.40,
+    min_open_interest=50,
+    max_spread_pct=0.30,
+    min_premium=0.10,
+    shares_owned=_ledger_pos.shares if _ledger_has_shares else 0,
+    cost_basis=_ledger_basis if strategy == Strategy.COVERED_CALL else None,
+    allow_below_basis=False,
+    cash_available=None,
+    desired_buy_price=None,
 )
+
 
 
 # ---------------------------------------------------------------------------
@@ -621,7 +436,7 @@ if ticker_input and (
     with st.spinner(f"Loading expirations for {ticker_input}…"):
         try:
             exps = cached_expirations(ticker_input)
-            default = dp.get_nearest_weekly_expiration(ticker_input)
+            default = pick_wheel_expiration(list(exps)) or dp.get_nearest_weekly_expiration(ticker_input)
             st.session_state["expirations"] = list(exps)
             st.session_state["default_exp"] = default
             st.session_state["last_ticker"] = ticker_input
@@ -642,8 +457,7 @@ if ticker_input and (
 
 # Resolve the expiration to use
 active_expiration = (
-    st.session_state.get("expiration_select")
-    or st.session_state.get("default_exp")
+    st.session_state.get("default_exp")
     or ""
 )
 
@@ -742,6 +556,10 @@ with tab_screener:
         # A. Market Overview
         st.divider()
         st.subheader(f"Market Overview — {result.quote.ticker}")
+        st.caption(
+            f"🗓️ Expiration {result.expiration} · {result.dte} DTE — picked "
+            f"automatically: the earliest 7–14 DTE (wheel window), else 5–21."
+        )
         rec_ui.render_market_overview(result, strategy, full_ind)
 
         # A2. Price Forecast (2-zone bias bar)

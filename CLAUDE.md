@@ -118,6 +118,30 @@ CC:
 - DTE > 21 → NO TRADE
 - Weekly regime strongly bearish (CSP) → NO TRADE
 
+## Screener — Max Premium · Low Assignment
+
+The Screener tab compares BOTH sides for the selected expiration
+(`scoring/assignment.py`, `ui/assignment_view.py`) and answers: "which
+side pays most while keeping assignment under my limit?"
+
+- Probability of assignment is built step by step and shown as drivers:
+  1. Options market: P(ITM) from the option's IV, no drift.
+  2. Realised vs implied vol: σ = 0.6·IV + 0.4·RV20 (≥ 0.7·IV); skipped
+     when earnings land before expiration.
+  3. Drift from the chart (annualised, capped ±60%): trend vs SMA20/50
+     scaled by ADX (±40%), MACD histogram (±10%), RSI ≥70 / ≤30 (∓20%),
+     RSI 60s / 30s (±5%), outside Bollinger bands (∓15%).
+  4. Support (puts) / resistance (calls) between price and strike cuts
+     the probability by up to 25% × the level's strength.
+- Picks per side: OTM, bid ≥ $0.05, spread ≤ 15%, OI ≥ the sidebar
+  minimum, CSP ≤ desired buy price, CC ≥ cost basis; probability ≤ the
+  "Max chance of assignment" slider (default 10%); most premium first,
+  top 3.
+- Verdict: the side with the higher premium yield on collateral wins;
+  within 15% of each other the chart's bias decides (bullish → CSP,
+  bearish → CC).
+- Nothing guarantees zero assignment; earnings before expiry are flagged.
+
 ## Roll Events (Manage Position)
 
 Rolls are priced with events in mind (`scoring/roll_events.py`). By the
@@ -213,6 +237,8 @@ App must always answer:
 - `scoring/engine.py` — recommendation selection + explanations
 - `ui/chart.py` — Plotly 3-panel chart
 - `ui/recommendations.py` — Streamlit card rendering
+- `scoring/assignment.py` — chart-aware probability of assignment, CC-vs-CSP picks (Screener)
+- `ui/assignment_view.py` — Screener "Max Premium · Low Assignment" panel
 - `scoring/csp_premium.py` — same-day CSP scorer (Daily Scanner)
 - `ui/scanner.py` — Daily Scanner tab, same-day CSP mode (records ATM IV daily for true IV rank)
 - `scoring/roll_events.py` — earnings / IV-event awareness for rolls (event move, event-adjusted credit)

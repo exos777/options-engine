@@ -43,12 +43,14 @@ from strategies.models import OptionContract
 # ── _pick_expiration ────────────────────────────
 
 def _exp(days_out: int) -> str:
-    return (date.today() + timedelta(days=days_out)).isoformat()
+    # The scanner dates everything in New York time; in the evening the
+    # server's UTC date is already tomorrow, so build test dates the same way.
+    return (scanner._market_today() + timedelta(days=days_out)).isoformat()
 
 
 def _at(hour: int, minute: int = 0) -> datetime:
     """Today in market time, at the given clock time."""
-    return datetime.combine(date.today(), time(hour, minute), tzinfo=_MARKET_TZ)
+    return datetime.combine(scanner._market_today(), time(hour, minute), tzinfo=_MARKET_TZ)
 
 
 MORNING = _at(10)

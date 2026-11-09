@@ -78,6 +78,13 @@ LEVEL_WEIGHTS = {
 
 PROB_FLOOR, PROB_CAP = 0.002, 0.99
 
+# Auto limit: strikes are scored premium − (1 + AVERSION) × expected
+# assignment cost, so a loss on assignment counts double — the trader would
+# rather not be assigned. The best strike's probability becomes the slider
+# limit, kept inside [AUTO_MIN, AUTO_MAX].
+ASSIGNMENT_AVERSION = 1.0
+AUTO_MIN_LIMIT, AUTO_MAX_LIMIT = 0.10, 0.30
+
 _MARKET_TZ = ZoneInfo("America/New_York")
 
 
@@ -265,6 +272,25 @@ def prob_itm(
     return _norm_cdf(-d2) if option_type == "put" else _norm_cdf(d2)
 
 
+def expected_shortfall(
+    spot: float, strike: float, years: float, sigma: float, drift: float, option_type: str,
+) -> float:
+    """
+    Expected amount the option finishes in the money, per share, under a
+    lognormal with drift: E[(K − S_T)+] for puts (the loss below the strike
+    if assigned), E[(S_T − K)+] for calls (the upside given up).
+    """
+    if spot <= 0 or strike <= 0 or years <= 0 or sigma <= 0:
+        return max(strike - spot, 0.0) if option_type == "put" else max(spot - strike, 0.0)
+    vs = sigma * math.sqrt(years)
+    d1 = (math.log(spot / strike) + (drift + 0.5 * sigma * sigma) * years) / vs
+    d2 = d1 - vs
+    fwd = spot * math.exp(drift * years)
+    if option_type == "put":
+        return max(strike * _norm_cdf(-d2) - fwd * _norm_cdf(-d1), 0.0)
+    return max(fwd * _norm_cdf(d1) - strike * _norm_cdf(d2), 0.0)
+
+
 @dataclass
 class AssignmentEstimate:
     prob: float                      # final P(assigned at expiration)
@@ -275,6 +301,7 @@ class AssignmentEstimate:
     cushion: Optional[float] = None  # nearest level between spot and strike
     levels_between: list[str] = field(default_factory=list)  # e.g. "SMA50 $225.10"
     weekly_ranges: float = 0.0       # strike distance ÷ (ATR × √5); 0 = no ATR
+    shortfall: float = 0.0           # expected $/share past the strike (model)
 
     @property
     def touch_prob(self) -> float:
@@ -432,6 +459,12 @@ def estimate_assignment(
         else min(between, key=lambda lv: lv.price)
     ) if between else None
 
+    # Expected amount past the strike, from the same model; the levels'
+    # cushion scales it like the probability.
+    shortfall = expected_shortfall(spot, k, years, sigma, view.drift, kind)
+    if p_drift > 0:
+        shortfall *= prob / p_drift
+
     prob = max(PROB_FLOOR, min(PROB_CAP, prob))
     return AssignmentEstimate(
         prob=prob,
@@ -445,6 +478,7 @@ def estimate_assignment(
             for lv in sorted(between, key=lambda l: -l.price if kind == "put" else l.price)
         ],
         weekly_ranges=weekly_ranges,
+        shortfall=shortfall,
     )
 
 
@@ -467,6 +501,16 @@ class SafePick:
     @property
     def credit_per_contract(self) -> float:
         return self.credit * 100.0
+
+    @property
+    def edge(self) -> float:
+        """Premium minus the loss-averse expected cost of assignment, $/share."""
+        return self.credit - (1.0 + ASSIGNMENT_AVERSION) * self.estimate.shortfall
+
+    @property
+    def edge_pct(self) -> float:
+        collateral = self.credit / self.yield_pct if self.yield_pct > 0 else 0.0
+        return self.edge / collateral if collateral > 0 else 0.0
 
 
 @dataclass
@@ -504,6 +548,44 @@ def pick_low_assignment(
     """
     out = SidePicks(side=side)
     kind = "put" if side == "CSP" else "call"
+    eligible = eligible_picks(
+        contracts, side, spot, dte, view, max_prob=max_prob,
+        supports=supports, resistances=resistances,
+        earnings_in_window=earnings_in_window, min_bid=min_bid,
+        max_spread_pct=max_spread_pct, min_open_interest=min_open_interest,
+        desired_buy_price=desired_buy_price, cost_basis=cost_basis,
+    )
+    eligible.sort(key=lambda p: (p.credit, -p.estimate.prob), reverse=True)
+    out.picks = eligible[:top_n]
+    if not out.picks:
+        out.excluded_reason = (
+            f"No liquid OTM {kind} keeps assignment under {max_prob:.0%}"
+            + (" at or below your desired buy price" if kind == "put" and desired_buy_price else "")
+            + (" above your cost basis" if kind == "call" and cost_basis else "")
+            + "."
+        )
+    return out
+
+
+def eligible_picks(
+    contracts: list[OptionContract],
+    side: str,
+    spot: float,
+    dte: int,
+    view: TechnicalView,
+    *,
+    max_prob: float,
+    supports: Optional[list[SupportResistanceLevel]] = None,
+    resistances: Optional[list[SupportResistanceLevel]] = None,
+    earnings_in_window: bool = False,
+    min_bid: float = 0.05,
+    max_spread_pct: float = 0.15,
+    min_open_interest: int = 0,
+    desired_buy_price: Optional[float] = None,
+    cost_basis: Optional[float] = None,
+) -> list[SafePick]:
+    """Every tradeable OTM strike on *side* with P(assignment) ≤ max_prob."""
+    kind = "put" if side == "CSP" else "call"
     eligible: list[SafePick] = []
     for c in contracts:
         if c.option_type != kind:
@@ -530,16 +612,40 @@ def pick_low_assignment(
             yield_pct=c.mid / collateral if collateral > 0 else 0.0,
             estimate=est,
         ))
-    eligible.sort(key=lambda p: (p.credit, -p.estimate.prob), reverse=True)
-    out.picks = eligible[:top_n]
-    if not out.picks:
-        out.excluded_reason = (
-            f"No liquid OTM {kind} keeps assignment under {max_prob:.0%}"
-            + (" at or below your desired buy price" if kind == "put" and desired_buy_price else "")
-            + (" above your cost basis" if kind == "call" and cost_basis else "")
-            + "."
+    return eligible
+
+
+@dataclass
+class AutoLimit:
+    limit: float                       # chosen slider value, AUTO_MIN–AUTO_MAX
+    best: Optional[SafePick]           # the strike with the best edge
+    reason: str
+
+
+def recommend_limit(*sides: list[SafePick]) -> AutoLimit:
+    """
+    The assignment limit with the best premium for the risk: score every
+    candidate (≤ AUTO_MAX_LIMIT) by edge per $ of collateral, take the
+    winner's probability, and keep it inside [AUTO_MIN_LIMIT, AUTO_MAX_LIMIT].
+    """
+    pool = [p for side in sides for p in side if p.estimate.prob <= AUTO_MAX_LIMIT]
+    if not pool:
+        return AutoLimit(AUTO_MIN_LIMIT, None, "No strike qualifies — default 10%.")
+    best = max(pool, key=lambda p: (p.edge_pct, p.credit))
+    if best.edge <= 0:
+        return AutoLimit(
+            AUTO_MIN_LIMIT, best,
+            "No strike pays enough for its assignment risk this week — kept at "
+            "the safest setting, 10%.",
         )
-    return out
+    limit = min(AUTO_MAX_LIMIT, max(AUTO_MIN_LIMIT, math.ceil(best.estimate.prob * 100) / 100))
+    kind = "P" if best.side == "CSP" else "C"
+    return AutoLimit(
+        limit, best,
+        f"${best.strike:g}{kind} has the best premium for its risk this week: "
+        f"${best.credit:.2f} premium vs ${best.estimate.shortfall:.2f} expected "
+        f"assignment cost ({best.estimate.prob:.0%} chance).",
+    )
 
 
 @dataclass

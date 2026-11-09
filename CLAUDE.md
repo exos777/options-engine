@@ -149,10 +149,16 @@ side pays most while keeping assignment under my limit?"
   confirmed downtrend (regime trade_bias "skip") → no CSPs.
 - Chart bias (bullish/bearish, for the CC-vs-CSP tie-break) comes from
   trend + MACD only; RSI/Bollinger snap-backs move odds, not direction.
-- Picks per side: OTM, bid ≥ $0.05, spread ≤ 15%, OI ≥ the sidebar
-  minimum, CSP ≤ desired buy price, CC ≥ cost basis; probability ≤ the
-  "Max chance of assignment" slider (default 10%); most premium first,
-  top 3.
+- Picks per side: OTM, bid ≥ $0.05, spread ≤ 15%, OI ≥ 50, CSP ≤
+  desired buy price, CC ≥ cost basis; probability ≤ the "Max chance of
+  assignment" slider; most premium first, top 3.
+- The slider is set automatically per ticker/expiration to the best
+  premium for the risk: every strike up to 30% is scored edge = premium −
+  2 × expected assignment cost (E[(K−S)+] for puts, E[(S−K)+] for calls,
+  same model as the probability; losses count double), per $ of
+  collateral; the best strike's probability, kept within 10–30%, becomes
+  the limit. A trader's own slider move sticks until the ticker or
+  expiration changes. Cards show premium vs expected assignment cost → edge.
 - Verdict: the side with the higher premium yield on collateral wins;
   within 15% of each other the chart's bias decides (bullish → CSP,
   bearish → CC).

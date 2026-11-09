@@ -15,10 +15,13 @@ from typing import Optional
 import streamlit as st
 
 from scoring.assignment import (
+    AUTO_MAX_LIMIT,
     SafePick,
     SidePicks,
     compare_sides,
+    eligible_picks,
     pick_low_assignment,
+    recommend_limit,
     technical_view,
 )
 
@@ -35,6 +38,11 @@ def _earnings_in_window(earnings_date: Optional[str], expiration: str) -> Option
     except (TypeError, ValueError):
         return None
     return ed if ed is not None and date.today() <= ed <= exp else None
+
+
+def _md_dollars(text: str) -> str:
+    """Escape "$" for Streamlit markdown: two in one line render as LaTeX."""
+    return text.replace("$", "\\$")
 
 
 def _pick_card(pick: SafePick, rank: int) -> None:
@@ -58,6 +66,11 @@ def _pick_card(pick: SafePick, rank: int) -> None:
         f'chance it is touched before expiry ~{est.touch_prob:.0%}</span></div>'
         f'<div style="font-size:12px;color:#c9d1d9;margin-top:4px;">'
         + (
+            f'⚖️ premium ${pick.credit:.2f} vs expected assignment cost '
+            f'${est.shortfall:.2f} → edge '
+            f'{"+" if pick.edge >= 0 else "−"}${abs(pick.edge):.2f} · '
+        )
+        + (
             f'📏 {est.weekly_ranges:.1f} weekly ranges {"below" if pick.side == "CSP" else "above"} price · '
             if est.weekly_ranges > 0 else ""
         )
@@ -73,8 +86,7 @@ def _pick_card(pick: SafePick, rank: int) -> None:
     with st.expander("Why this probability", expanded=False):
         lines = [f"Options market (IV, no drift): **{est.market_prob:.1%}**"]
         for text, change in est.drivers:
-            # Escape "$": two of them in one line render as a LaTeX formula.
-            text = text.replace("$", "\\$")
+            text = _md_dollars(text)
             sign = "−" if change < 0 else "+"
             lines.append(
                 f"{sign}{abs(change) * 100:.1f} pts · {text}" if change else f"· {text}"
@@ -115,13 +127,8 @@ def render_assignment_panel(
         "low/high — stacked, with clusters counted as stronger zones. Also "
         "used: how much the stock really moves vs IV, a TTM squeeze, and a "
         "small pull from trend (SMA · ADX · MACD) and overbought/oversold "
-        "(RSI · Bollinger). Nothing guarantees zero assignment — set the most "
-        "risk you'll accept."
+        "(RSI · Bollinger). Nothing guarantees zero assignment."
     )
-    max_prob = st.slider(
-        "Max chance of assignment", 3, 30, 10, step=1, format="%d%%",
-        key="asg_max_prob",
-    ) / 100.0
 
     spot = result.quote.price
     view = technical_view(full_ind, spot)
@@ -130,9 +137,9 @@ def render_assignment_panel(
     # Wheel hard filters (CLAUDE.md, no exceptions on this tab).
     if not (_MIN_DTE <= result.dte <= _MAX_DTE):
         st.error(
-            f"⛔ No trade (wheel rule): this expiration is {result.dte} days out; "
-            f"the wheel trades {_MIN_DTE}–{_MAX_DTE} DTE. Pick another expiration "
-            f"in the sidebar.",
+            f"⛔ No trade (wheel rule): the nearest expiration is {result.dte} "
+            f"days out and none falls in the wheel's {_MIN_DTE}–{_MAX_DTE} DTE "
+            f"window for this ticker.",
         )
         return
     if ed is not None:
@@ -143,6 +150,43 @@ def render_assignment_panel(
         )
         return
     downtrend = getattr(getattr(result, "regime", None), "trade_bias", "") == "skip"
+
+    common = dict(
+        supports=result.support_levels,
+        resistances=result.resistance_levels,
+        earnings_in_window=False,          # blocked above
+        max_spread_pct=_HARD_MAX_SPREAD,
+        min_open_interest=min_open_interest,
+    )
+
+    # Auto limit: the probability of the strike with the best premium for
+    # its risk, 10–30%. Re-applied whenever the ticker or expiration
+    # changes; the trader's own slider moves stick until then.
+    auto = recommend_limit(
+        [] if downtrend else eligible_picks(
+            puts, "CSP", spot, result.dte, view, max_prob=AUTO_MAX_LIMIT,
+            desired_buy_price=desired_buy_price, **common,
+        ),
+        eligible_picks(
+            calls, "CC", spot, result.dte, view, max_prob=AUTO_MAX_LIMIT,
+            cost_basis=cost_basis, **common,
+        ),
+    )
+    auto_key = (result.quote.ticker, result.expiration)
+    if st.session_state.get("_asg_auto_for") != auto_key:
+        st.session_state["_asg_auto_for"] = auto_key
+        st.session_state["asg_max_prob"] = int(round(auto.limit * 100))
+    max_prob = st.slider(
+        "Max chance of assignment", 3, 30, step=1, format="%d%%",
+        key="asg_max_prob",
+        help="Set automatically to the best premium-for-risk this week "
+             "(10–30%). Move it to override.",
+    ) / 100.0
+    reason = _md_dollars(auto.reason)
+    if st.session_state["asg_max_prob"] == int(round(auto.limit * 100)):
+        st.caption(f"🎯 Auto-set to {auto.limit:.0%} — {reason}")
+    else:
+        st.caption(f"✋ Your setting. Auto would be {auto.limit:.0%} — {reason}")
 
     common = dict(
         max_prob=max_prob,

@@ -103,13 +103,39 @@ def test_dte_uses_leg2_expiration():
     assert days_to_expiration(leg2) == 10  # 3 + 7
 
 
-# ── pick_wheel_expiration ───────────────────────
+# ── pick_weekly_expiration ──────────────────────
 
-def test_pick_wheel_expiration_prefers_7_to_14_then_5_to_21():
-    from datetime import date, timedelta
-    from data.common import pick_wheel_expiration
-    t = date(2026, 11, 9)
-    d = lambda n: (t + timedelta(days=n)).isoformat()
-    assert pick_wheel_expiration([d(2), d(5), d(9), d(12)], today=t) == d(9)
-    assert pick_wheel_expiration([d(2), d(5), d(16)], today=t) == d(5)
-    assert pick_wheel_expiration([d(1), d(30)], today=t) is None
+from datetime import datetime, time as _time, timedelta as _td  # noqa: E402
+from zoneinfo import ZoneInfo  # noqa: E402
+
+from data.common import pick_weekly_expiration  # noqa: E402
+
+_NY = ZoneInfo("America/New_York")
+_MON = datetime(2026, 11, 9, 10, 0, tzinfo=_NY)          # Monday 10:00 ET
+_EXPS = ["2026-11-10", "2026-11-11", "2026-11-13", "2026-11-20", "2026-11-27"]
+
+
+def _at(day_offset: int, hour: int, minute: int = 0) -> datetime:
+    d = (_MON + _td(days=day_offset)).date()
+    return datetime.combine(d, _time(hour, minute), tzinfo=_NY)
+
+
+def test_weekly_is_this_weeks_friday_from_any_weekday():
+    for offset in range(5):                                  # Mon–Fri
+        assert pick_weekly_expiration(_EXPS, now=_at(offset, 10)) == "2026-11-13"
+
+
+def test_friday_after_the_close_and_weekend_roll_to_next_friday():
+    assert pick_weekly_expiration(_EXPS, now=_at(4, 16, 5)) == "2026-11-20"
+    assert pick_weekly_expiration(_EXPS, now=_at(5, 12)) == "2026-11-20"   # Saturday
+    assert pick_weekly_expiration(_EXPS, now=_at(6, 12)) == "2026-11-20"   # Sunday
+
+
+def test_holiday_week_uses_the_last_expiration_before_friday():
+    # Good-Friday style week: weekly expires Thursday.
+    exps = ["2026-11-10", "2026-11-12", "2026-11-20"]
+    assert pick_weekly_expiration(exps, now=_at(0, 10)) == "2026-11-12"
+
+
+def test_no_expiration_this_week():
+    assert pick_weekly_expiration(["2026-11-27"], now=_at(0, 10)) is None

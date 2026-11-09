@@ -28,7 +28,9 @@ from scoring.assignment import (
 _SIDE_NAME = {"CSP": "Cash-Secured Put", "CC": "Covered Call"}
 _SIDE_COLOR = {"CSP": "#58a6ff", "CC": "#3fb950"}
 _HARD_MAX_SPREAD = 0.15     # CLAUDE.md hard filter
-_MIN_DTE, _MAX_DTE = 5, 21   # CLAUDE.md hard filters: DTE < 5 / > 21 → no trade
+# Weekly only: this week's Friday close, 0–7 DTE. (The trader's choice —
+# overrides CLAUDE.md's "DTE < 5 → NO TRADE" for this panel.)
+_MIN_DTE, _MAX_DTE = 0, 7
 
 
 def _earnings_in_window(earnings_date: Optional[str], expiration: str) -> Optional[date]:
@@ -137,9 +139,8 @@ def render_assignment_panel(
     # Wheel hard filters (CLAUDE.md, no exceptions on this tab).
     if not (_MIN_DTE <= result.dte <= _MAX_DTE):
         st.error(
-            f"⛔ No trade (wheel rule): the nearest expiration is {result.dte} "
-            f"days out and none falls in the wheel's {_MIN_DTE}–{_MAX_DTE} DTE "
-            f"window for this ticker.",
+            f"⛔ No trade: this ticker has no weekly expiration this week — "
+            f"the nearest is {result.dte} days out.",
         )
         return
     if ed is not None:

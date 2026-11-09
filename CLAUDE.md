@@ -144,9 +144,15 @@ side pays most while keeping assignment under my limit?"
      cap 40%. "Last week" = the last 5 completed sessions.
 - Each pick shows its distance in weekly ranges (ATR × √5) and the
   levels standing in front of the strike.
-- The wheel hard filters apply to this panel: DTE outside 5–21 or
-  earnings before expiration → "No trade (wheel rule)" and no picks;
-  confirmed downtrend (regime trade_bias "skip") → no CSPs.
+- Expiration is ALWAYS this week's Friday close, counted from when the
+  scan runs (New York time): Mon–Fri → that Friday (Friday before 4 pm =
+  0 DTE); after Friday's close or on the weekend → next Friday; in a
+  holiday week, the last expiration on or before Friday
+  (`pick_weekly_expiration`). By the trader's choice this panel trades
+  0–7 DTE (overrides "DTE < 5 → NO TRADE" here only).
+- Other wheel hard filters still apply: earnings before expiration →
+  "No trade (wheel rule)" and no picks; confirmed downtrend (regime
+  trade_bias "skip") → no CSPs.
 - Chart bias (bullish/bearish, for the CC-vs-CSP tie-break) comes from
   trend + MACD only; RSI/Bollinger snap-backs move odds, not direction.
 - Picks per side: OTM, bid ≥ $0.05, spread ≤ 15%, OI ≥ 50, CSP ≤

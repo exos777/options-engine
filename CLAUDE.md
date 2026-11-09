@@ -124,15 +124,25 @@ The Screener tab compares BOTH sides for the selected expiration
 (`scoring/assignment.py`, `ui/assignment_view.py`) and answers: "which
 side pays most while keeping assignment under my limit?"
 
-- Probability of assignment is built step by step and shown as drivers:
+- Probability of assignment is built step by step and shown as drivers.
+  Over one week, distance in weekly ranges and the levels in between
+  matter more than direction, so trend is a small input:
   1. Options market: P(ITM) from the option's IV, no drift.
   2. Realised vs implied vol: σ = 0.6·IV + 0.4·RV20 (≥ 0.7·IV); skipped
-     when earnings land before expiration.
-  3. Drift from the chart (annualised, capped ±60%): trend vs SMA20/50
-     scaled by ADX (±40%), MACD histogram (±10%), RSI ≥70 / ≤30 (∓20%),
-     RSI 60s / 30s (±5%), outside Bollinger bands (∓15%).
-  4. Support (puts) / resistance (calls) between price and strike cuts
-     the probability by up to 25% × the level's strength.
+     when earnings land before expiration or a TTM squeeze is on.
+  3. Drift from the chart (annualised, capped ±40%): trend vs SMA20/50
+     scaled by ADX (±25%), MACD histogram (±6%), RSI ≥70 / ≤30 (∓20%),
+     RSI 60s / 30s (±4%), outside Bollinger bands (∓15%).
+  4. Every level between price and strike — swing support/resistance
+     (weight 0.3 + 0.5 × strength), SMA50 0.60, SMA20 0.45, EMA21 0.40,
+     VWAP 0.40, Bollinger band 0.50, last week's low/high 0.50, 20-day
+     low/high 0.60. Levels within 0.25 ATR merge into a zone (+0.15 per
+     extra level); a zone within 0.2 ATR of price counts half. Each zone
+     cuts up to 20% × weight, stacked multiplicatively, total cap 40%.
+- Each pick shows its distance in weekly ranges (ATR × √sessions) and
+  the levels standing in front of the strike.
+- Chart bias (bullish/bearish, for the CC-vs-CSP tie-break) comes from
+  trend + MACD only; RSI/Bollinger snap-backs move odds, not direction.
 - Picks per side: OTM, bid ≥ $0.05, spread ≤ 15%, OI ≥ the sidebar
   minimum, CSP ≤ desired buy price, CC ≥ cost basis; probability ≤ the
   "Max chance of assignment" slider (default 10%); most premium first,

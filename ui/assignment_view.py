@@ -55,12 +55,22 @@ def _pick_card(pick: SafePick, rank: int) -> None:
         f'Chance of assignment <b style="color:{color};">{est.prob:.0%}</b> '
         f'<span style="color:#8b949e;">· {delta_txt} · market {est.market_prob:.0%} · '
         f'chance it is touched before expiry ~{est.touch_prob:.0%}</span></div>'
+        f'<div style="font-size:12px;color:#c9d1d9;margin-top:4px;">'
+        f'📏 {est.weekly_ranges:.1f} weekly ranges {"below" if pick.side == "CSP" else "above"} price'
+        + (
+            f' · 🧱 behind {", ".join(est.levels_between[:4])}'
+            + (f" +{len(est.levels_between) - 4} more" if len(est.levels_between) > 4 else "")
+            if est.levels_between else " · no level in front of the strike"
+        )
+        + "</div>"
         f"</div>",
         unsafe_allow_html=True,
     )
     with st.expander("Why this probability", expanded=False):
         lines = [f"Options market (IV, no drift): **{est.market_prob:.1%}**"]
         for text, change in est.drivers:
+            # Escape "$": two of them in one line render as a LaTeX formula.
+            text = text.replace("$", "\\$")
             sign = "−" if change < 0 else "+"
             lines.append(
                 f"{sign}{abs(change) * 100:.1f} pts · {text}" if change else f"· {text}"
@@ -94,11 +104,15 @@ def render_assignment_panel(
     """Render the CC-vs-CSP "max premium, low assignment" section."""
     st.subheader("🎯 Max Premium · Low Assignment")
     st.caption(
-        "Assignment odds from the whole chart, not just delta: the options "
-        "market's view, adjusted for how much the stock really moves, trend "
-        "(SMA20/50 · ADX), momentum (MACD · RSI), Bollinger stretch and "
-        "support/resistance between price and strike. Nothing guarantees "
-        "zero assignment — set the most risk you'll accept."
+        "Assignment odds from the whole chart, not just delta. Over one week "
+        "what matters most is how far the strike is in typical weekly ranges "
+        "(ATR) and what stands in front of it: swing support/resistance, "
+        "SMA20/50, EMA21, VWAP, Bollinger bands, last week's and the 20-day "
+        "low/high — stacked, with clusters counted as stronger zones. Also "
+        "used: how much the stock really moves vs IV, a TTM squeeze, and a "
+        "small pull from trend (SMA · ADX · MACD) and overbought/oversold "
+        "(RSI · Bollinger). Nothing guarantees zero assignment — set the most "
+        "risk you'll accept."
     )
     max_prob = st.slider(
         "Max chance of assignment", 3, 30, 10, step=1, format="%d%%",

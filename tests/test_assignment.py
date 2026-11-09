@@ -6,7 +6,10 @@ import pytest
 
 from indicators.technical import calculate_full_indicators
 from scoring.assignment import (
+    LEVEL_CUSHION,
     MAX_DRIFT,
+    MAX_TOTAL_CUSHION,
+    Level,
     AssignmentEstimate,
     SafePick,
     SidePicks,
@@ -79,8 +82,10 @@ def test_support_between_price_and_strike_is_a_cushion():
     sup = [SupportResistanceLevel(price=97.0, level_type="support", strength=0.8, touches=4)]
     plain = estimate_assignment(_opt(95), SPOT, WEEK, FLAT)
     cushioned = estimate_assignment(_opt(95), SPOT, WEEK, FLAT, supports=sup)
-    assert cushioned.prob == pytest.approx(plain.prob * (1 - 0.25 * 0.8))
+    # Swing level weight = 0.30 + 0.50 × strength.
+    assert cushioned.prob == pytest.approx(plain.prob * (1 - LEVEL_CUSHION * (0.30 + 0.50 * 0.8)))
     assert cushioned.cushion == 97.0
+    assert cushioned.levels_between == ["swing support $97.00"]
     # A level below the strike is no cushion.
     low = [SupportResistanceLevel(price=93.0, level_type="support", strength=0.9, touches=5)]
     assert estimate_assignment(_opt(95), SPOT, WEEK, FLAT, supports=low).cushion is None
@@ -91,8 +96,11 @@ def test_support_between_price_and_strike_is_a_cushion():
 def test_technical_view_reads_trend(bullish_df, bearish_df):
     bull = technical_view(calculate_full_indicators(bullish_df), float(bullish_df["Close"].iloc[-1]))
     bear = technical_view(calculate_full_indicators(bearish_df), float(bearish_df["Close"].iloc[-1]))
-    assert bull.drift > 0 and bull.bias == "bullish"
-    assert bear.drift < 0 and bear.bias == "bearish"
+    assert bull.bias == "bullish"
+    assert bear.bias == "bearish"
+    # Trend direction is in the drift even when RSI pulls the other way.
+    assert any("uptrend" in l for l, _ in bull.parts)
+    assert any("downtrend" in l for l, _ in bear.parts)
     for v in (bull, bear):
         assert abs(v.drift) <= MAX_DRIFT
         assert v.realized_vol > 0
@@ -167,3 +175,70 @@ def test_chart_breaks_a_near_tie():
 def test_verdict_when_one_or_no_side_qualifies():
     assert compare_sides(SidePicks("CSP"), SidePicks("CC", [_pick("CC", 105, 0.01)]), FLAT).side == "CC"
     assert compare_sides(SidePicks("CSP"), SidePicks("CC"), FLAT).side is None
+
+
+# ── levels from every indicator ─────────────────
+
+def _view(levels, atr=2.0, **kw):
+    return TechnicalView(levels=levels, atr=atr, **kw)
+
+
+def test_moving_averages_count_as_floors_for_puts():
+    sma50 = Level(96.5, "SMA50", 0.60, "both")
+    plain = estimate_assignment(_opt(95), SPOT, WEEK, _view([]))
+    est = estimate_assignment(_opt(95), SPOT, WEEK, _view([sma50]))
+    assert est.prob == pytest.approx(plain.prob * (1 - LEVEL_CUSHION * 0.60))
+    assert "SMA50 $96.50" in est.drivers[-1][0]
+    # The same average above a call strike's path does nothing for a put.
+    assert estimate_assignment(_opt(95), SPOT, WEEK, _view([Level(103, "SMA20", 0.45, "both")])).prob == pytest.approx(plain.prob)
+
+
+def test_stacked_levels_add_up_with_diminishing_returns_and_a_cap():
+    lv = [Level(98.0, "SMA20", 0.45, "both"), Level(96.0, "SMA50", 0.60, "both"),
+          Level(95.6, "last week's low", 0.50, "support")]
+    plain = estimate_assignment(_opt(95), SPOT, WEEK, _view([], atr=1.0))
+    est = estimate_assignment(_opt(95), SPOT, WEEK, _view(lv, atr=1.0))
+    # 96.0 and 95.6 are within 0.25 ATR? no (0.4 apart, ATR 1.0 → 0.25) — three zones.
+    keep = (1 - LEVEL_CUSHION * 0.45) * (1 - LEVEL_CUSHION * 0.60) * (1 - LEVEL_CUSHION * 0.50)
+    assert est.prob == pytest.approx(plain.prob * keep)
+    assert len(est.levels_between) == 3
+    many = [Level(95.2 + i * 0.6, f"L{i}", 1.0, "support") for i in range(8)]
+    capped = estimate_assignment(_opt(95), SPOT, WEEK, _view(many, atr=1.0))
+    assert capped.prob == pytest.approx(plain.prob * (1 - MAX_TOTAL_CUSHION))
+
+
+def test_levels_close_together_form_one_stronger_zone():
+    zone = [Level(96.5, "SMA50", 0.60, "both"), Level(96.4, "swing", 0.50, "support")]
+    plain = estimate_assignment(_opt(95), SPOT, WEEK, _view([], atr=2.0))
+    est = estimate_assignment(_opt(95), SPOT, WEEK, _view(zone, atr=2.0))
+    assert est.prob == pytest.approx(plain.prob * (1 - LEVEL_CUSHION * (0.60 + 0.15)))
+    assert "SMA50 $96.50 + swing $96.40" in est.drivers[-1][0]
+
+
+def test_a_level_right_at_price_counts_half():
+    plain = estimate_assignment(_opt(95), SPOT, WEEK, _view([], atr=2.0))
+    near = estimate_assignment(_opt(95), SPOT, WEEK, _view([Level(99.8, "SMA20", 0.60, "both")], atr=2.0))
+    assert near.prob == pytest.approx(plain.prob * (1 - LEVEL_CUSHION * 0.30))
+
+
+def test_squeeze_cancels_the_realised_vol_discount():
+    calm = estimate_assignment(_opt(95, iv=0.40), SPOT, WEEK, _view([], realized_vol=0.20))
+    coiled = estimate_assignment(_opt(95, iv=0.40), SPOT, WEEK,
+                                 _view([], realized_vol=0.20, squeeze=True))
+    assert coiled.prob > calm.prob
+    assert coiled.prob == pytest.approx(coiled.market_prob)
+    assert "squeeze" in coiled.drivers[0][0]
+
+
+def test_distance_in_weekly_ranges():
+    est = estimate_assignment(_opt(95), SPOT, WEEK, _view([], atr=2.0))
+    assert est.weekly_ranges == pytest.approx(5 / (2.0 * (5 ** 0.5)))
+
+
+def test_technical_view_collects_indicator_levels(bullish_df):
+    full = calculate_full_indicators(bullish_df)
+    view = technical_view(full, float(bullish_df["Close"].iloc[-1]))
+    names = {lv.name for lv in view.levels}
+    assert {"SMA50", "SMA20", "EMA21", "VWAP", "lower Bollinger band",
+            "last week's low", "20-day low", "20-day high"} <= names
+    assert view.atr > 0

@@ -47,6 +47,49 @@ _REGIME_COLOR = {
 # Market overview
 # ---------------------------------------------------------------------------
 
+def _target_for(result: ScreenerResult, full_ind: FullIndicators | None):
+    """(TargetPrice, "Fri Nov 13") for the expiration, or None."""
+    from datetime import date as _date
+    from scoring.assignment import TechnicalView, predict_target, technical_view
+
+    q = result.quote
+    if q.price <= 0:
+        return None
+    view = technical_view(full_ind, q.price) if full_ind is not None else TechnicalView()
+    iv = (
+        result.expected_move / q.price / math.sqrt(max(result.dte, 1) / 365)
+        if result.expected_move > 0 else 0.0
+    )
+    try:
+        exp = _date.fromisoformat(result.expiration)
+        ed = _date.fromisoformat(str(q.earnings_date)[:10]) if q.earnings_date else None
+    except (TypeError, ValueError):
+        return None
+    t = predict_target(
+        view, q.price, result.dte, iv,
+        supports=result.support_levels, resistances=result.resistance_levels,
+        earnings_in_window=ed is not None and _date.today() <= ed <= exp,
+    )
+    return (t, f"{exp:%a %b %d}") if t is not None else None
+
+
+def _target_explainer(t, spot: float, exp_label: str) -> str:
+    """One line: why the target sits where it does (markdown-safe)."""
+    pulls = [label for label, d in t.drivers if d != 0]
+    move = t.raw / spot - 1
+    if abs(move) < 0.001 or not pulls:
+        why = "no clear pull from the chart — the most likely close is about today's price"
+    else:
+        why = f"chart pulls it {'up' if move > 0 else 'down'}: " + ", ".join(pulls[:4])
+    stop = f"; stopped at {t.stop_level} (raw target ${t.raw:,.2f})" if t.stop_level else ""
+    text = (
+        f"🎯 Most likely close by {exp_label}: ${t.price:,.2f} — {why}{stop}. "
+        f"68% of the time it should finish between ${t.low:,.2f} and ${t.high:,.2f}."
+    )
+    # Streamlit markdown renders text between two "$" as LaTeX.
+    return text.replace("$", "\\$")
+
+
 def render_market_overview(
     result: ScreenerResult,
     strategy: Strategy,
@@ -65,10 +108,8 @@ def render_market_overview(
     elif rsi < 70:      rsi_label = "🟡 Near Overbought"
     else:               rsi_label = "🔴 Overbought"
 
-    # ── ATR % of price ─────────────────────────────────────────────────────
-    atr = ind.atr_14
-    atr_pct = atr / q.price * 100 if q.price > 0 else 0.0
-    atr_label = f"{atr_pct:.1f}% of price"
+    # ── Target price at expiration (replaces ATR) ──────────────────────────
+    target = _target_for(result, full_ind)
 
     # ── Vol Environment (IV30 vs HV30) ─────────────────────────────────────
     iv30_val: float | None = None
@@ -115,7 +156,18 @@ def render_market_overview(
     pct = q.change_pct * 100
     col1.metric("Price", f"${q.price:.2f}", f"{pct:+.2f}%")
     col2.metric("RSI (14)", f"{rsi:.1f}", rsi_label)
-    col3.metric("ATR (14)", f"${atr:.2f}", atr_label)
+    if target is not None:
+        t, exp_label = target
+        col3.metric(
+            f"🎯 Target · {exp_label}",
+            f"${t.price:.2f}",
+            # Escaped "$": metric deltas are markdown (two "$" = LaTeX).
+            f"{t.price / q.price - 1:+.1%} · 68% \\${t.low:.2f}–\\${t.high:.2f}",
+        )
+    else:
+        atr = ind.atr_14
+        col3.metric("ATR (14)", f"${atr:.2f}",
+                    f"{atr / q.price * 100:.1f}% of price" if q.price > 0 else "")
     col4.metric("Vol Environment", vol_display, vol_detail)
     col5.metric(
         "Chart Regime",
@@ -123,6 +175,9 @@ def render_market_overview(
         secondary_label,
         delta_color=regime_delta_color,
     )
+
+    if target is not None:
+        st.caption(_target_explainer(target[0], q.price, target[1]))
 
     # ── Row 2: expected move bar ────────────────────────────────────────────
     if em > 0:

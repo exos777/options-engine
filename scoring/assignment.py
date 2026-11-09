@@ -690,3 +690,63 @@ def compare_sides(csp: SidePicks, cc: SidePicks, view: TechnicalView) -> SideVer
         why = "it pays meaningfully more at the same risk"
     name = "cash-secured puts" if side == "CSP" else "covered calls"
     return SideVerdict(side, f"This week favors {name} — {why}.", reasons)
+
+
+# ---------------------------------------------------------------------------
+# Target price at expiration
+# ---------------------------------------------------------------------------
+
+@dataclass
+class TargetPrice:
+    price: float                     # most likely close (median), after levels
+    low: float                       # 68% range, low end
+    high: float                      # 68% range, high end
+    raw: float                       # median before any level stops it
+    stop_level: Optional[str] = None # e.g. "SMA20 $58.10" when a level caps it
+    sigma: float = 0.0
+    drivers: list[tuple[str, float]] = field(default_factory=list)  # drift parts
+
+
+def predict_target(
+    view: TechnicalView,
+    spot: float,
+    dte: int,
+    iv: float,
+    *,
+    supports: Optional[list[SupportResistanceLevel]] = None,
+    resistances: Optional[list[SupportResistanceLevel]] = None,
+    earnings_in_window: bool = False,
+) -> Optional[TargetPrice]:
+    """
+    Most likely closing price at expiration from the same chart model as the
+    assignment odds: the median of a lognormal with the chart's drift and
+    the realised/implied volatility blend, stopped at the first strong level
+    between price and that median (price tends to stall there first), with
+    a 68% range around it.
+    """
+    if spot <= 0 or (iv <= 0 and view.realized_vol <= 0):
+        return None
+    years = max(dte, 0.5) / 365.0
+    base_iv = iv if iv > 0 else view.realized_vol
+    sigma = base_iv
+    if iv > 0 and not earnings_in_window and not view.squeeze and view.realized_vol > 0:
+        sigma = max((1 - RV_WEIGHT) * iv + RV_WEIGHT * view.realized_vol,
+                    iv * MIN_SIGMA_SHARE_OF_IV)
+    center = (view.drift - 0.5 * sigma * sigma) * years
+    spread = sigma * math.sqrt(years)
+    raw = spot * math.exp(center)
+    low, high = spot * math.exp(center - spread), spot * math.exp(center + spread)
+
+    # The first level standing between price and the raw target stops it.
+    target, stop = raw, None
+    if abs(raw - spot) > 1e-9:
+        kind = "call" if raw > spot else "put"     # resistance above / support below
+        between = _levels_between(raw, spot, kind, view, supports or [], resistances or [])
+        if between:
+            first = (min if raw > spot else max)(between, key=lambda lv: lv.price)
+            target, stop = first.price, f"{first.name} ${first.price:,.2f}"
+
+    return TargetPrice(
+        price=target, low=low, high=high, raw=raw, stop_level=stop,
+        sigma=sigma, drivers=list(view.parts),
+    )

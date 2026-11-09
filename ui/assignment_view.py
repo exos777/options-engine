@@ -25,6 +25,7 @@ from scoring.assignment import (
 _SIDE_NAME = {"CSP": "Cash-Secured Put", "CC": "Covered Call"}
 _SIDE_COLOR = {"CSP": "#58a6ff", "CC": "#3fb950"}
 _HARD_MAX_SPREAD = 0.15     # CLAUDE.md hard filter
+_MIN_DTE, _MAX_DTE = 5, 21   # CLAUDE.md hard filters: DTE < 5 / > 21 → no trade
 
 
 def _earnings_in_window(earnings_date: Optional[str], expiration: str) -> Optional[date]:
@@ -56,11 +57,14 @@ def _pick_card(pick: SafePick, rank: int) -> None:
         f'<span style="color:#8b949e;">· {delta_txt} · market {est.market_prob:.0%} · '
         f'chance it is touched before expiry ~{est.touch_prob:.0%}</span></div>'
         f'<div style="font-size:12px;color:#c9d1d9;margin-top:4px;">'
-        f'📏 {est.weekly_ranges:.1f} weekly ranges {"below" if pick.side == "CSP" else "above"} price'
         + (
-            f' · 🧱 behind {", ".join(est.levels_between[:4])}'
+            f'📏 {est.weekly_ranges:.1f} weekly ranges {"below" if pick.side == "CSP" else "above"} price · '
+            if est.weekly_ranges > 0 else ""
+        )
+        + (
+            f'🧱 behind {", ".join(est.levels_between[:4])}'
             + (f" +{len(est.levels_between) - 4} more" if len(est.levels_between) > 4 else "")
-            if est.levels_between else " · no level in front of the strike"
+            if est.levels_between else "no level in front of the strike"
         )
         + "</div>"
         f"</div>",
@@ -122,26 +126,45 @@ def render_assignment_panel(
     spot = result.quote.price
     view = technical_view(full_ind, spot)
     ed = _earnings_in_window(earnings_date, result.expiration)
-    if ed is not None:
-        st.warning(
-            f"📅 Earnings {ed:%a %b %d} lands before this expiration — the "
-            f"stock can gap through any strike. IV is used in full (no "
-            f"realised-vol discount), but a probability can't capture a gap.",
-            icon="⚠️",
+
+    # Wheel hard filters (CLAUDE.md, no exceptions on this tab).
+    if not (_MIN_DTE <= result.dte <= _MAX_DTE):
+        st.error(
+            f"⛔ No trade (wheel rule): this expiration is {result.dte} days out; "
+            f"the wheel trades {_MIN_DTE}–{_MAX_DTE} DTE. Pick another expiration "
+            f"in the sidebar.",
         )
+        return
+    if ed is not None:
+        st.error(
+            f"⛔ No trade (wheel rule): earnings {ed:%a %b %d} land before this "
+            f"expiration — the stock can gap through any strike. Pick an "
+            f"expiration before the report.",
+        )
+        return
+    downtrend = getattr(getattr(result, "regime", None), "trade_bias", "") == "skip"
 
     common = dict(
         max_prob=max_prob,
         supports=result.support_levels,
         resistances=result.resistance_levels,
-        earnings_in_window=ed is not None,
+        earnings_in_window=False,          # blocked above
         max_spread_pct=_HARD_MAX_SPREAD,
         min_open_interest=min_open_interest,
     )
-    csp = pick_low_assignment(
-        puts, "CSP", spot, result.dte, view,
-        desired_buy_price=desired_buy_price, **common,
-    )
+    if downtrend:
+        csp = SidePicks(
+            side="CSP",
+            excluded_reason=(
+                "⛔ No cash-secured puts (wheel rule): the chart is in a "
+                "confirmed downtrend."
+            ),
+        )
+    else:
+        csp = pick_low_assignment(
+            puts, "CSP", spot, result.dte, view,
+            desired_buy_price=desired_buy_price, **common,
+        )
     cc = pick_low_assignment(
         calls, "CC", spot, result.dte, view,
         cost_basis=cost_basis, **common,

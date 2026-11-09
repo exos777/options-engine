@@ -136,11 +136,17 @@ side pays most while keeping assignment under my limit?"
   4. Every level between price and strike — swing support/resistance
      (weight 0.3 + 0.5 × strength), SMA50 0.60, SMA20 0.45, EMA21 0.40,
      VWAP 0.40, Bollinger band 0.50, last week's low/high 0.50, 20-day
-     low/high 0.60. Levels within 0.25 ATR merge into a zone (+0.15 per
-     extra level); a zone within 0.2 ATR of price counts half. Each zone
-     cuts up to 20% × weight, stacked multiplicatively, total cap 40%.
-- Each pick shows its distance in weekly ranges (ATR × √sessions) and
-  the levels standing in front of the strike.
+     low/high 0.60. Levels within 0.1% of each other are one price point
+     (no double counting). Each level cuts 20% × weight; levels within
+     0.25 ATR of a zone's first level form a zone whose cut is its members'
+     combined cut + 3% per extra level (a cluster is never weaker than the
+     same levels apart); a zone within 0.2 ATR of price counts half; total
+     cap 40%. "Last week" = the last 5 completed sessions.
+- Each pick shows its distance in weekly ranges (ATR × √5) and the
+  levels standing in front of the strike.
+- The wheel hard filters apply to this panel: DTE outside 5–21 or
+  earnings before expiration → "No trade (wheel rule)" and no picks;
+  confirmed downtrend (regime trade_bias "skip") → no CSPs.
 - Chart bias (bullish/bearish, for the CC-vs-CSP tie-break) comes from
   trend + MACD only; RSI/Bollinger snap-backs move odds, not direction.
 - Picks per side: OTM, bid ≥ $0.05, spread ≤ 15%, OI ≥ the sidebar

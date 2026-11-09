@@ -34,7 +34,9 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
+from datetime import date, datetime
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 from strategies.models import OptionContract, SupportResistanceLevel
 
@@ -58,7 +60,8 @@ MIN_SIGMA_SHARE_OF_IV = 0.70
 LEVEL_CUSHION = 0.20
 MAX_TOTAL_CUSHION = 0.40
 LEVEL_MERGE_ATR = 0.25
-CONFLUENCE_BONUS = 0.15        # weight added per extra level in a zone
+CONFLUENCE_BONUS = 0.03        # extra cut per additional level in a zone
+SAME_POINT_PCT = 0.001         # levels this close (0.1%) are one price point
 NEAR_SPOT_ATR = 0.20           # a level this close to price is about to be
                                # tested — it counts half
 
@@ -74,6 +77,8 @@ LEVEL_WEIGHTS = {
 }
 
 PROB_FLOOR, PROB_CAP = 0.002, 0.99
+
+_MARKET_TZ = ZoneInfo("America/New_York")
 
 
 # ---------------------------------------------------------------------------
@@ -94,6 +99,7 @@ class TechnicalView:
     parts: list[tuple[str, float]] = field(default_factory=list)
     realized_vol: float = 0.0                # 20-day annualised
     bias: str = "neutral"                    # bullish / neutral / bearish
+    direction: float = 0.0                   # trend + MACD drift (bias source)
     atr: float = 0.0                         # 14-day, $
     squeeze: bool = False                    # TTM squeeze on
     levels: list[Level] = field(default_factory=list)  # indicator levels
@@ -118,6 +124,7 @@ def technical_view(full_ind, spot: float) -> TechnicalView:
         return view
 
     parts: list[tuple[str, float]] = []
+    direction = 0.0          # trend + MACD only — drives the bias label
 
     # Trend: price vs SMA20 / SMA50, strength from ADX.
     sma20, sma50 = _last(full_ind.sma20), _last(full_ind.sma50)
@@ -133,13 +140,15 @@ def technical_view(full_ind, spot: float) -> TechnicalView:
         elif spot < sma50:
             parts.append(("below SMA50, mixed short term", -TREND_DRIFT * 0.5 * strength))
 
+    if parts:
+        direction += parts[-1][1]
+
     # Momentum: MACD histogram.
     hist = _last(full_ind.macd_data.histogram)
     if hist is not None and hist != 0:
-        parts.append(
-            ("MACD rising" if hist > 0 else "MACD falling",
-             MACD_DRIFT if hist > 0 else -MACD_DRIFT)
-        )
+        macd = MACD_DRIFT if hist > 0 else -MACD_DRIFT
+        parts.append(("MACD rising" if hist > 0 else "MACD falling", macd))
+        direction += macd
 
     # RSI: extremes revert, the 60s/30s persist a little.
     rsi = _last(full_ind.rsi14)
@@ -166,7 +175,7 @@ def technical_view(full_ind, spot: float) -> TechnicalView:
     view.parts = parts
     # Bias is the chart's DIRECTION (trend + MACD); RSI / Bollinger
     # snap-backs move the odds but don't make a downtrend "neutral".
-    direction = sum(d for label, d in parts if "trend" in label or "SMA50" in label or "MACD" in label)
+    view.direction = direction
     view.bias = (
         "bullish" if direction > BIAS_THRESHOLD
         else "bearish" if direction < -BIAS_THRESHOLD else "neutral"
@@ -190,6 +199,15 @@ def technical_view(full_ind, spot: float) -> TechnicalView:
     return view
 
 
+def _last_bar_is_today(full_ind, today: Optional[date] = None) -> bool:
+    try:
+        last = full_ind.dates[-1]
+        last_date = last.date() if hasattr(last, "date") else last
+    except Exception:
+        return False
+    return last_date == (today or datetime.now(_MARKET_TZ).date())
+
+
 def _indicator_levels(full_ind) -> list[Level]:
     """Moving averages, VWAP, Bollinger bands and recent lows/highs as levels."""
     out: list[Level] = []
@@ -209,9 +227,13 @@ def _indicator_levels(full_ind) -> list[Level]:
     add(_last(full_ind.bb.lower), "lower Bollinger band", "Bollinger band", "support")
     add(_last(full_ind.bb.upper), "upper Bollinger band", "Bollinger band", "resistance")
     try:
-        # Last 5 completed sessions ≈ last week; exclude today's bar.
-        low5 = float(full_ind.low.iloc[-6:-1].min())
-        high5 = float(full_ind.high.iloc[-6:-1].max())
+        # Last 5 COMPLETED sessions. The newest bar is today's unfinished
+        # session only when it is dated today; before the open, on
+        # weekends, or when the feed ends at the prior close it is the most
+        # recent completed session and must be included.
+        week = slice(-6, -1) if _last_bar_is_today(full_ind) else slice(-5, None)
+        low5 = float(full_ind.low.iloc[week].min())
+        high5 = float(full_ind.high.iloc[week].max())
         add(low5, "last week's low", "last week's", "support")
         add(high5, "last week's high", "last week's", "resistance")
         add(float(full_ind.low.tail(20).min()), "20-day low", "20-day", "support")
@@ -252,7 +274,7 @@ class AssignmentEstimate:
     sigma: float = 0.0
     cushion: Optional[float] = None  # nearest level between spot and strike
     levels_between: list[str] = field(default_factory=list)  # e.g. "SMA50 $225.10"
-    weekly_ranges: float = 0.0       # strike distance ÷ (ATR × √sessions)
+    weekly_ranges: float = 0.0       # strike distance ÷ (ATR × √5); 0 = no ATR
 
     @property
     def touch_prob(self) -> float:
@@ -274,8 +296,31 @@ def _levels_between(
         for lv in pivots
     ]
     if option_type == "put":
-        return [lv for lv in pool if strike < lv.price < spot]
-    return [lv for lv in pool if spot < lv.price < strike]
+        inside = [lv for lv in pool if strike < lv.price < spot]
+    else:
+        inside = [lv for lv in pool if spot < lv.price < strike]
+    return _same_points(inside)
+
+
+def _same_points(levels: list[Level]) -> list[Level]:
+    """
+    Collapse levels at practically the same price (within SAME_POINT_PCT)
+    into one: the 20-day low, last week's low and a swing low are often the
+    very same bar — one price point, not three independent floors.
+    """
+    out: list[Level] = []
+    for lv in sorted(levels, key=lambda l: l.price):
+        if out and lv.price - out[-1].price <= out[-1].price * SAME_POINT_PCT:
+            head = out[-1]
+            out[-1] = Level(
+                price=max(head.price, lv.price) if head.side == "support" else head.price,
+                name=f"{head.name} / {lv.name}",
+                weight=max(head.weight, lv.weight),
+                side=head.side,
+            )
+        else:
+            out.append(lv)
+    return out
 
 
 def _zones(levels: list[Level], atr: float) -> list[list[Level]]:
@@ -286,7 +331,9 @@ def _zones(levels: list[Level], atr: float) -> list[list[Level]]:
     ordered = sorted(levels, key=lambda lv: lv.price)
     zones: list[list[Level]] = [[ordered[0]]]
     for lv in ordered[1:]:
-        if lv.price - zones[-1][-1].price <= gap:
+        # Measured from the zone's first level, so a staircase of levels
+        # can't chain into one zone several ATRs wide.
+        if lv.price - zones[-1][0].price <= gap:
             zones[-1].append(lv)
         else:
             zones.append([lv])
@@ -351,12 +398,19 @@ def estimate_assignment(
     zones = _zones(between, view.atr)
     zone_cuts: list[tuple[str, float]] = []
     for zone in zones:
-        weight = min(1.0, max(lv.weight for lv in zone) + CONFLUENCE_BONUS * (len(zone) - 1))
+        # A cluster is at least as strong as its levels counted separately,
+        # plus a small confluence bonus — never weaker.
+        keep_zone = 1.0
+        for lv in zone:
+            keep_zone *= 1.0 - LEVEL_CUSHION * lv.weight
+        # (No per-zone cap: it could make a cluster weaker than the same
+        # levels spread out; MAX_TOTAL_CUSHION bounds the total instead.)
+        cut = min(1.0, 1.0 - keep_zone + CONFLUENCE_BONUS * (len(zone) - 1))
         mid = sum(lv.price for lv in zone) / len(zone)
         if view.atr > 0 and abs(spot - mid) < NEAR_SPOT_ATR * view.atr:
-            weight *= 0.5                       # about to be tested anyway
+            cut *= 0.5                          # about to be tested anyway
         names = " + ".join(f"{lv.name} ${lv.price:,.2f}" for lv in sorted(zone, key=lambda l: -l.weight))
-        zone_cuts.append((names, LEVEL_CUSHION * weight))
+        zone_cuts.append((names, cut))
     keep = 1.0
     for _, f in zone_cuts:
         keep *= 1.0 - f
@@ -371,11 +425,8 @@ def estimate_assignment(
                 drivers.append((f"{names} stands {label} price, before the strike", -share))
         prob -= removed
 
-    # Distance in typical weekly ranges (ATR × √sessions to expiry).
-    sessions = max(1.0, dte * 5.0 / 7.0)
-    weekly_ranges = (
-        abs(spot - k) / (view.atr * math.sqrt(sessions)) if view.atr > 0 else 0.0
-    )
+    # Distance in typical weekly ranges (ATR × √5 sessions), whatever the DTE.
+    weekly_ranges = abs(spot - k) / (view.atr * math.sqrt(5.0)) if view.atr > 0 else 0.0
     nearest = (
         max(between, key=lambda lv: lv.price) if kind == "put"
         else min(between, key=lambda lv: lv.price)

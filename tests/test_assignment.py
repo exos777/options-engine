@@ -6,6 +6,7 @@ import pytest
 
 from indicators.technical import calculate_full_indicators
 from scoring.assignment import (
+    CONFLUENCE_BONUS,
     LEVEL_CUSHION,
     MAX_DRIFT,
     MAX_TOTAL_CUSHION,
@@ -18,6 +19,8 @@ from scoring.assignment import (
     estimate_assignment,
     pick_low_assignment,
     prob_itm,
+    _indicator_levels,
+    _zones,
     technical_view,
 )
 from strategies.models import OptionContract, SupportResistanceLevel
@@ -211,8 +214,36 @@ def test_levels_close_together_form_one_stronger_zone():
     zone = [Level(96.5, "SMA50", 0.60, "both"), Level(96.4, "swing", 0.50, "support")]
     plain = estimate_assignment(_opt(95), SPOT, WEEK, _view([], atr=2.0))
     est = estimate_assignment(_opt(95), SPOT, WEEK, _view(zone, atr=2.0))
-    assert est.prob == pytest.approx(plain.prob * (1 - LEVEL_CUSHION * (0.60 + 0.15)))
+    cut = 1 - (1 - LEVEL_CUSHION * 0.60) * (1 - LEVEL_CUSHION * 0.50) + CONFLUENCE_BONUS
+    assert est.prob == pytest.approx(plain.prob * (1 - cut))
     assert "SMA50 $96.50 + swing $96.40" in est.drivers[-1][0]
+
+
+def test_a_cluster_never_protects_less_than_the_same_levels_spread_out():
+    prices_far, prices_near = (98.0, 96.5, 95.5), (96.6, 96.5, 96.4)
+    mk = lambda ps: [Level(p, f"L{p}", 0.6, "support") for p in ps]
+    far = estimate_assignment(_opt(95), SPOT, WEEK, _view(mk(prices_far), atr=2.0))
+    near = estimate_assignment(_opt(95), SPOT, WEEK, _view(mk(prices_near), atr=2.0))
+    assert near.prob <= far.prob
+
+
+def test_zones_cannot_chain_wider_than_the_merge_gap():
+    # Each 0.4 apart, gap 0.5 (ATR 2 × 0.25): anchor-based → not one zone.
+    stair = [Level(98.0 - 0.4 * i, f"S{i}", 0.5, "support") for i in range(5)]
+    zones = _zones(stair, atr=2.0)
+    assert all(z[-1].price - z[0].price <= 0.5 for z in zones)
+    assert len(zones) >= 3
+
+
+def test_one_price_point_is_not_counted_three_times():
+    same = [Level(96.50, "20-day low", 0.60, "support"),
+            Level(96.50, "last week's low", 0.50, "support"),
+            Level(96.52, "swing support", 0.70, "support")]
+    plain = estimate_assignment(_opt(95), SPOT, WEEK, _view([], atr=2.0))
+    est = estimate_assignment(_opt(95), SPOT, WEEK, _view(same, atr=2.0))
+    assert est.prob == pytest.approx(plain.prob * (1 - LEVEL_CUSHION * 0.70))
+    assert len(est.levels_between) == 1
+    assert "20-day low / last week's low / swing support" in est.levels_between[0]
 
 
 def test_a_level_right_at_price_counts_half():
@@ -233,6 +264,10 @@ def test_squeeze_cancels_the_realised_vol_discount():
 def test_distance_in_weekly_ranges():
     est = estimate_assignment(_opt(95), SPOT, WEEK, _view([], atr=2.0))
     assert est.weekly_ranges == pytest.approx(5 / (2.0 * (5 ** 0.5)))
+    # Always one WEEK's range, whatever the expiration.
+    two_weeks = estimate_assignment(_opt(95), SPOT, 14, _view([], atr=2.0))
+    assert two_weeks.weekly_ranges == pytest.approx(est.weekly_ranges)
+    assert estimate_assignment(_opt(95), SPOT, WEEK, _view([], atr=0.0)).weekly_ranges == 0.0
 
 
 def test_technical_view_collects_indicator_levels(bullish_df):
@@ -242,3 +277,13 @@ def test_technical_view_collects_indicator_levels(bullish_df):
     assert {"SMA50", "SMA20", "EMA21", "VWAP", "lower Bollinger band",
             "last week's low", "20-day low", "20-day high"} <= names
     assert view.atr > 0
+
+
+def test_last_weeks_low_includes_the_latest_completed_session(bullish_df):
+    """When the newest bar is NOT today (weekend / pre-market), it is the
+    latest completed session and belongs in last week's low."""
+    df = bullish_df.copy()
+    df.iloc[-1, df.columns.get_loc("Low")] = 50.0          # Friday's new low
+    full = calculate_full_indicators(df)                    # dates end 2024-12-31
+    low = next(lv for lv in _indicator_levels(full) if lv.name == "last week's low")
+    assert low.price == 50.0
